@@ -14,6 +14,7 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
+#import <objc/message.h>
 
 #pragma mark - IL2CPP 类型声明（只声明本工程用到的）
 
@@ -59,7 +60,9 @@ static bool IsCapturedNow(void)
     UITraitCollection *tc = [UITraitCollection currentTraitCollection];
     SEL s = NSSelectorFromString(@"sceneCaptureState");
     if (tc && [tc respondsToSelector:s]) {
-        NSInteger state = (NSInteger)[tc performSelector:s];
+        // 用 objc_msgSend 函数指针调用，规避 performSelector 的 ARC 泄漏告警
+        NSInteger (*send)(id, SEL) = (NSInteger (*)(id, SEL))objc_msgSend;
+        NSInteger state = send(tc, s);
         if (state != 0)   // != UISceneCaptureStateNone
             return true;
     }
@@ -72,7 +75,13 @@ static NSArray<NSString *> *HiddenKeywords(void)
 {
     static NSArray *kws;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ kws = @[@"UnityEngine.", @".dll"]; });
+    dispatch_once(&once, ^{
+        kws = @[
+            @"UnityEngine.",   // 类名形如 UnityEngine.Rigidbody / BoxCollider / AudioPlayer
+            @".dll",           // 程序集名
+            // 可自行追加你希望隐藏的特征词，例如：@"贝总", @"U3D"
+        ];
+    });
     return kws;
 }
 
@@ -91,6 +100,7 @@ static NSString *NSStringFromIl2CppString(Il2CppString *str)
 {
     if (!str || !IL2CPP_string_length || !IL2CPP_string_chars) return nil;
     int32_t len = IL2CPP_string_length(str);
+    // sanity：文本长度不可能超大/为负（防误把 GUIContent 对象当字符串读）
     if (len <= 0 || len > 4096) return nil;
     char16_t *chars = IL2CPP_string_chars(str);
     if (!chars) return nil;
@@ -99,12 +109,17 @@ static NSString *NSStringFromIl2CppString(Il2CppString *str)
 
 #pragma mark - Hook 实现
 
+// UnityEngine.GUI.Label / Box 的 IL2CPP C 签名（static）：
+//   void Method(Il2CppObject* __this, Rect* position, Il2CppString* text, const MethodInfo* method)
 static void (*orig_GUI_Label)(void*, void*, void*, void*);
 static void hook_GUI_Label(void *__this, void *position, void *textArg, void *method)
 {
     if (IsCapturedNow()) {
         NSString *txt = NSStringFromIl2CppString((Il2CppString *)textArg);
-        if (ShouldHideText(txt)) return;
+        if (ShouldHideText(txt)) {
+            // 正在录屏 且 是贝总工具的类名文字 → 跳过绘制（画面干净）
+            return;
+        }
     }
     orig_GUI_Label(__this, position, textArg, method);
 }
@@ -114,7 +129,9 @@ static void hook_GUI_Box(void *__this, void *position, void *textArg, void *meth
 {
     if (IsCapturedNow()) {
         NSString *txt = NSStringFromIl2CppString((Il2CppString *)textArg);
-        if (ShouldHideText(txt)) return;
+        if (ShouldHideText(txt)) {
+            return;
+        }
     }
     orig_GUI_Box(__this, position, textArg, method);
 }
@@ -138,25 +155,30 @@ static void HookGUIMethod(const char *methodName, void *hookFn, void **origOut)
     }
 
     void *iter = NULL;
-    const Il2CppMethodInfo *m;
-    while ((m = IL2CPP_class_get_methods(guiCls, &iter)) != NULL) {
-        const char *mn = IL2CPP_method_get_name(m);
-        if (!mn || strcmp(mn, methodName) != 0) continue;
+    const Il2CppMethodInfo **methods;
+    // il2cpp_class_get_methods 返回的是方法指针数组，需内层遍历数组元素
+    while ((methods = IL2CPP_class_get_methods(guiCls, &iter)) != NULL) {
+        const Il2CppMethodInfo *m;
+        for (m = *methods; m != NULL; m = *(++methods)) {
+            const char *mn = IL2CPP_method_get_name(m);
+            if (!mn || strcmp(mn, methodName) != 0) continue;
 
-        int argc = IL2CPP_method_get_param_count(m);
-        if (argc != 2) continue; // (Rect, text)
+            int argc = IL2CPP_method_get_param_count(m);
+            if (argc != 2) continue; // (Rect, text)
 
-        const Il2CppParameterInfo *p1 = IL2CPP_method_get_param(m, 1);
-        if (!p1 || !p1->name) continue;
-        if (strstr(p1->name, "text") == NULL && strstr(p1->name, "content") == NULL)
-            continue;
+            const Il2CppParameterInfo *p1 = IL2CPP_method_get_param(m, 1);
+            if (!p1 || !p1->name) continue;
+            // 第二个参数名含 "text" / "content" → 判定为文本重载（贝总工具绘制类名用的是这类）
+            if (strstr(p1->name, "text") == NULL && strstr(p1->name, "content") == NULL)
+                continue;
 
-        void *addr = IL2CPP_method_get_address(m);
-        if (!addr) continue;
+            void *addr = IL2CPP_method_get_address(m);
+            if (!addr) continue;
 
-        MSHookFunction_fn(addr, hookFn, origOut);
-        NSLog(@"[hideonrecord] ✅ hook 成功 UnityEngine.GUI.%s", mn);
-        break;
+            MSHookFunction_fn(addr, hookFn, origOut);
+            NSLog(@"[hideonrecord] ✅ hook 成功 UnityEngine.GUI.%s", mn);
+            return; // 只 hook 第一个匹配的文本重载
+        }
     }
 }
 
@@ -165,8 +187,10 @@ static void HookGUIMethod(const char *methodName, void *hookFn, void **origOut)
 __attribute__((constructor)) static void HideLabelOnRecord_ctor(void)
 {
     @autoreleasepool {
+        // 解析 MSHookFunction（ElleKit 的 substrate 兼容层）
         MSHookFunction_fn = (void(*)(void*, void*, void**))dlsym(RTLD_DEFAULT, "MSHookFunction");
 
+        // 解析 il2cpp API
         IL2CPP_domain_get             = (Il2CppDomain* (*)(void))dlsym(RTLD_DEFAULT, "il2cpp_domain_get");
         IL2CPP_class_from_name        = (Il2CppClass* (*)(Il2CppDomain*, const void*, const char*, const char*))dlsym(RTLD_DEFAULT, "il2cpp_class_from_name");
         IL2CPP_class_get_methods      = (const Il2CppMethodInfo** (*)(Il2CppClass*, void**))dlsym(RTLD_DEFAULT, "il2cpp_class_get_methods");
