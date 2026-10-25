@@ -1,0 +1,43 @@
+name: GameRecorder Build
+
+on:
+  push:
+    paths:
+      - 'GameRecorder/**'
+      - '.github/workflows/gamerecorder.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Theos
+        run: |
+          export THEOS="/Users/runner/work/_temp/theos"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS" || true
+          ls "$THEOS/bin/make" >/dev/null 2>&1 || bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+          brew install ldid xz || true
+
+      - name: Symlink Xcode SDK
+        run: |
+          export THEOS="/Users/runner/work/_temp/theos"
+          SDKPATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          sudo mkdir -p "$THEOS/sdks"
+          sudo ln -sf "$SDKPATH" "$THEOS/sdks/iPhoneOS17.0.sdk"
+          echo "SDK=$SDKPATH"
+
+      - name: Build
+        working-directory: GameRecorder
+        run: |
+          export THEOS="/Users/runner/work/_temp/theos"
+          make clean || true
+          make
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameRecorder.dylib
+          path: GameRecorder/.theos/obj/debug/**/*.dylib
+          if-no-files-found: error
