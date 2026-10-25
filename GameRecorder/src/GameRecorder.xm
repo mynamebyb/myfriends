@@ -39,7 +39,7 @@ static NSURL *gOutURL;
 static NSInteger gFrameCount;
 static CGSize gVideoSize;
 static double gStartTime;  // 录制开始时间（真实时间戳，避免慢动作）
-static int gFrameSkip;     // 限帧计数器（保留）
+static int gFrameSkip;     // 限帧计数器（~30fps：每 2 帧捕获一次）
 static int gInflightBlits; // 在途 blit command buffer 数（限制占用 drawable，防止池耗尽闪退）
 
 static CAMetalLayer *gGameLayer;
@@ -89,13 +89,13 @@ static CAMetalLayer *findGameLayer(void) {
     return best;
 }
 
-#pragma mark - 初始化录制（用 drawable.texture 真实尺寸，降分辨率）
+#pragma mark - 初始化录制（用 drawable.texture 真实尺寸，进一步压缩画质）
 
 static BOOL initWriterFromSize(CGSize texSize) {
     if (texSize.width <= 0 || texSize.height <= 0) return NO;
-    // 降分辨率：目标宽度 720，保比例（偶数高），减编码负担
+    // 进一步压缩画质：目标宽度 540（减编码负担），保比例（偶数高）
     gVideoSize = texSize;
-    CGFloat targetW = 720;
+    CGFloat targetW = 540;
     if (gVideoSize.width > targetW) {
         CGFloat ratio = targetW / gVideoSize.width;
         gVideoSize = CGSizeMake(targetW, (NSInteger)(gVideoSize.height * ratio / 2) * 2);
@@ -112,8 +112,8 @@ static BOOL initWriterFromSize(CGSize texSize) {
         AVVideoCodecKey: AVVideoCodecTypeH264,
         AVVideoWidthKey: @((int)gVideoSize.width),
         AVVideoHeightKey: @((int)gVideoSize.height),
-        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(6 * 1024 * 1024),
-                                            AVVideoExpectedSourceFrameRateKey: @(55) }
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(3 * 1024 * 1024),
+                                            AVVideoExpectedSourceFrameRateKey: @(30) }
     };
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
     gInput.expectsMediaDataInRealTime = YES;
@@ -264,8 +264,8 @@ static void stopRecording(void) {
 static id hook_nextDrawable(id self, SEL sel) {
     id d = orig_nextDrawable(self, sel);
     if (gRecording && self == gGameLayer) {
-        // 高帧率：每帧捕获（跟随游戏帧率，约55~60fps），720p 编码负担小
-        if (prevGameDrawable) {
+        // 限帧 ~30fps（每 2 帧捕获一次）+ 非阻塞丢帧：540p 编码负载小，避免长录内存暴涨闪退
+        if (++gFrameSkip % 2 == 0 && prevGameDrawable) {
             captureDrawable(prevGameDrawable);
         }
         prevGameDrawable = d;  // 强引用保留本帧，供下一帧拷贝
