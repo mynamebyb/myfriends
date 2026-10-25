@@ -65,9 +65,6 @@ static UIViewController *topViewController(void) {
 #pragma mark - 查找游戏主 layer
 
 static CAMetalLayer *findGameLayer(void) {
-    UIWindow *kw = [UIApplication sharedApplication].keyWindow;
-    UIView *v = kw.rootViewController.view;
-    if (v && [v.layer isKindOfClass:[CAMetalLayer class]]) return (CAMetalLayer *)v.layer;
     CAMetalLayer *best = nil;
     CGFloat bestArea = 0;
     for (UIWindow *w in [UIApplication sharedApplication].windows) {
