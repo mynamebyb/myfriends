@@ -1,42 +1,40 @@
-name: GameRecorder Build
-
+name: Build GameRecorder
 on:
   push:
-    branches: [ "main", "master" ]
+    paths:
+      - 'GameRecorder/**'
+      - '.github/workflows/gamerecorder.yml'
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Theos + SDK
+      - uses: actions/checkout@v4
+      - name: Cache Theos
+        uses: actions/cache@v4
+        with:
+          path: /Users/runner/work/_temp/theos
+          key: theos-v2
+      - name: Setup Theos
         run: |
-          export THEOS="${{ runner.temp }}/theos"
-          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
-          echo "$THEOS/bin" >> "$GITHUB_PATH"
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
-          # 直接软链 Xcode 自带 SDK，禁止 install-theos 下载 patched SDK
-          mkdir -p "$THEOS/sdks"
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          ln -sfn "$SDK" "$THEOS/sdks/$(basename "$SDK")"
-          ls -la "$THEOS/sdks"
-          brew install ldid
-
+          export THEOS="/Users/runner/work/_temp/theos"
+          if [ ! -f "$THEOS/makefiles/common.mk" ]; then
+            git clone --single-branch --depth 1 --recursive https://github.com/theos/theos.git "$THEOS"
+          fi
+          brew install ldid xz || true
+      - name: Symlink SDK
+        run: |
+          export THEOS="/Users/runner/work/_temp/theos"
+          SDKPATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          sudo mkdir -p "$THEOS/sdks"
+          sudo ln -sf "$SDKPATH" "$THEOS/sdks/iPhoneOS17.5.sdk"
       - name: Build
-        working-directory: GameRecorder
         run: |
-          make clean || true
-          make
-
-      - name: Verify
-        working-directory: GameRecorder
-        run: |
-          find .theos -name "*.dylib" -exec file {} \;
-
-      - name: Upload dylib
+          export THEOS="/Users/runner/work/_temp/theos"
+          rm -rf GameRecorder/.theos
+          cd GameRecorder && make
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: GameRecorder.dylib
