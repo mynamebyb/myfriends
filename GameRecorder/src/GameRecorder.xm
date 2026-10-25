@@ -369,7 +369,7 @@ static void setupButton(void) {
     [gBtnWindow makeKeyAndVisible];
 }
 
-#pragma mark - 轮询等 UI 就绪后再建悬浮按钮（适配 DYLD 注入时机早 / 多 dylib 顺序）
+#pragma mark - 轮询等 UI 就绪后再建悬浮按钮（静态函数，避免 block 递归 retain cycle）
 
 static void trySetupUI(void) {
     if (gBtnWindow) return;
@@ -380,6 +380,20 @@ static void trySetupUI(void) {
     setupButton();
     if (gBtnWindow && !gBtnWindow.hidden) {
         NSLog(@"[GameRecorder] 悬浮按钮已创建，开始捕获");
+    }
+}
+
+static void GameRecorder_poll(void) {
+    static int tries = 0;
+    tries++;
+    trySetupUI();
+    if (!gBtnWindow && tries < 60) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            GameRecorder_poll();
+        });
+    } else if (!gBtnWindow) {
+        NSLog(@"[GameRecorder] 30s 内未建按钮（未找到游戏画面）");
     }
 }
 
@@ -403,20 +417,10 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
 
-        // 轮询等 UI 就绪后建悬浮按钮（用 __block 避免递归 block 自引用报错）
-        __block int tries = 0;
-        __block dispatch_block_t poll;
-        poll = ^{
-            tries++;
-            trySetupUI();
-            if (!gBtnWindow && tries < 60) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), poll);
-            } else if (!gBtnWindow) {
-                NSLog(@"[GameRecorder] 30s 内未建按钮（未找到游戏画面）");
-            }
-        };
+        // 轮询等 UI 就绪后建悬浮按钮（用静态函数，无 retain cycle）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), poll);
+                       dispatch_get_main_queue(), ^{
+            GameRecorder_poll();
+        });
     }
 }
