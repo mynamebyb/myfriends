@@ -2,16 +2,13 @@
 //  HideLabelOnRecord.xm — standalone 注入 dylib
 //
 //  功能：隐藏「贝总 U3D 工具 / U3D通杀工具」用 Dear ImGui 绘制的界面（物体名、方框、射线等）。
-//  原理：hook 它导出符号 ImGui_ImplMetal_RenderDrawData —— 这是把 ImGui draw data 提交到
-//       屏幕（Metal 后端）的最后一步。
+//  原理：hook 它导出符号 ImGui_ImplMetal_RenderDrawData —— 把 ImGui draw data 提交到屏幕（Metal 后端）的最后一步。
 //
 //  注入：LiveContainer + ElleKit / Sideloadly 重签名。
-//  hook 用 dlsym("MSHookFunction")（ElleKit substrate 兼容层），不静态链接 substrate。
+//  hook 复用贝总工具自带的 Dobby 引擎（dlsym "DobbyHook"），避免 MSHookFunction 与它内部 Dobby 冲突。
 //
 //  隐藏方式：录屏时清空 ImDrawData（CmdListsCount/TotalVtxCount/TotalIdxCount）后仍调用原函数，
 //  而非直接 return —— 避免 Metal 提交异常崩溃，同时使 ImGui 界面不渲染、游戏画面保留。
-//
-//  时机：延迟 20 秒 hook，避开启动画面与贝总悬浮窗首次渲染的临界点。
 //
 
 #import <Foundation/Foundation.h>
@@ -19,9 +16,11 @@
 #import <dlfcn.h>
 #import <objc/message.h>
 
-#pragma mark - MSHookFunction（运行时解析，ElleKit 提供）
+#pragma mark - Dobby hook（运行时解析，复用贝总工具自带 Dobby 引擎）
 
-static void (*MSHookFunction_fn)(void *symbol, void *replace, void **result);
+// Dobby 签名：int DobbyHook(void *address, void *replacement, void **origin);
+typedef int (*DobbyHookFn)(void *, void *, void **);
+static DobbyHookFn DobbyHook_fn;
 
 #pragma mark - 录屏状态检测
 
@@ -62,30 +61,29 @@ static void hook_RenderDrawData(void *drawData, void *cmdBuffer, void *cmdEncode
     orig_RenderDrawData(drawData, cmdBuffer, cmdEncoder);
 }
 
-#pragma mark - 加载入口（延迟 hook，避开启动期与贝总工具 Dobby 初始化冲突）
+#pragma mark - 加载入口（延迟 hook，复用 Dobby 引擎）
 
 __attribute__((constructor)) static void HideLabelOnRecord_ctor(void)
 {
     @autoreleasepool {
-        MSHookFunction_fn = (void(*)(void*, void*, void**))dlsym(RTLD_DEFAULT, "MSHookFunction");
-        if (!MSHookFunction_fn) {
-            NSLog(@"[hideonrecord] MSHookFunction 不可用（ElleKit 未开）");
+        DobbyHook_fn = (DobbyHookFn)dlsym(RTLD_DEFAULT, "DobbyHook");
+        if (!DobbyHook_fn) {
+            NSLog(@"[hideonrecord] 未找到 DobbyHook（贝总工具未携带 Dobby？）");
             return;
         }
 
         const char *sym = "_Z30ImGui_ImplMetal_RenderDrawDataP10ImDrawDataPU27objcproto16MTLCommandBuffer11objc_objectPU34objcproto23MTLRenderCommandEncoder11objc_object";
 
-        // 延迟 20 秒再 hook：避开启动画面 + 贝总悬浮窗首次渲染的临界点；
-        // 等贝总工具完全稳定运行后再打补丁，避免闪退。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)),
+        // 延迟 5 秒再 hook，等贝总悬浮窗稳定运行后再打补丁。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             void *target = dlsym(RTLD_DEFAULT, sym);
             if (!target) {
                 NSLog(@"[hideonrecord] 延迟 hook 失败：未找到 ImGui_ImplMetal_RenderDrawData 符号");
                 return;
             }
-            MSHookFunction_fn(target, (void *)&hook_RenderDrawData, (void **)&orig_RenderDrawData);
-            NSLog(@"[hideonrecord] ✅ 已延迟 hook ImGui_ImplMetal_RenderDrawData（录屏时隐藏）");
+            int rc = DobbyHook_fn(target, (void *)&hook_RenderDrawData, (void **)&orig_RenderDrawData);
+            NSLog(@"[hideonrecord] ✅ Dobby hook ImGui_ImplMetal_RenderDrawData rc=%d（录屏时隐藏）", rc);
         });
     }
 }
