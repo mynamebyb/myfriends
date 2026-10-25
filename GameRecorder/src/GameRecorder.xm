@@ -1,11 +1,11 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：自签原生版（Sideloadly 注入）· 60fps / 720p / 2Mbps · 每 15 秒分段
-//  分段：每 15 秒自动结束当前片段、销毁 AVAssetWriter 释放编码器，再开新段续录。
+//  版本：自签原生版（Sideloadly/nbtool 注入）· 60fps / 720p / 2Mbps · 每 15 秒分段
+//  分段：每 15 秒结束当前片段，延迟 0.8s 等硬件编码器完全释放后再建新段，避免新旧编码会话重叠。
 //        录完自动存相册，不再弹分享页面。
 //
-//  注入：Sideloadly 重签名原生运行（LiveContainer 内存配额不够，已弃用）
+//  注入：Sideloadly/nbtool 重签名原生运行（LiveContainer 内存配额不够，已弃用）
 //  目标：com.ScarletWork.CounterFlame
 //
 
@@ -157,7 +157,7 @@ static void startNewSegment(void) {
     });
 }
 
-// 结束当前段并存相册，然后开新段续录
+// 结束当前段并存相册，延迟 0.8s 等编码器释放后再开新段，避免新旧编码会话重叠
 static void cutSegment(void) {
     if (!gInput) { gNeedNewSegment = 0; return; }
     gNeedNewSegment = 1;
@@ -173,7 +173,11 @@ static void cutSegment(void) {
         } else {
             NSLog(@"[GameRecorder] 段 %ld 未完成 %ld", (long)(gSegIndex-1), (long)oldW.status);
         }
-        startNewSegment();
+        // 延迟 0.8s 再重建，给硬件编码器充分释放时间
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
+                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            startNewSegment();
+        });
     }];
 }
 
@@ -371,7 +375,7 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        NSLog(@"[GameRecorder] ✅ 已注入 %@（自签原生版 60fps/720p/2Mbps/15s分段）", bid);
+        NSLog(@"[GameRecorder] ✅ 已注入 %@（自签原生版 60fps/720p/2Mbps/15s分段+0.8s释放间隔）", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
