@@ -109,7 +109,7 @@ static BOOL initWriterFromSize(CGSize texSize) {
         AVVideoCodecKey: AVVideoCodecTypeHEVC,   // HEVC 硬编码：压缩率高、码率低、更稳
         AVVideoWidthKey: @((int)gVideoSize.width),
         AVVideoHeightKey: @((int)gVideoSize.height),
-        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(2 * 1024 * 1024),
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(1024 * 1024),   // 1Mbps：体积小，稳
                                             AVVideoExpectedSourceFrameRateKey: @(30) }
     };
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
