@@ -10,6 +10,9 @@
 //  注入方式：LiveContainer + ElleKit / Sideloadly 重签名。
 //  hook 采用运行时 dlsym("MSHookFunction")（ElleKit 提供 substrate 兼容层），不静态链接 substrate。
 //
+//  【当前为测试版】FORCE_BLOCK_ALL=1，永久拦截所有 GUI.Label/Box 绘制（不判断录屏），
+//  用来验证贝总工具是否走 IMGUI 路线。验证完把 FORCE_BLOCK_ALL 改回 0 即恢复录屏隐藏逻辑。
+//
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -47,6 +50,9 @@ static char16_t*     (*IL2CPP_string_chars)(Il2CppString*);
 #pragma mark - MSHookFunction（运行时解析，ElleKit 提供）
 
 static void (*MSHookFunction_fn)(void *symbol, void *replace, void **result);
+
+// 测试开关：=1 时永久拦截所有 GUI.Label/Box 绘制（不判断录屏），用来验证贝总工具是否走 IMGUI 路线
+#define FORCE_BLOCK_ALL 1
 
 #pragma mark - 录屏状态检测
 
@@ -114,6 +120,10 @@ static NSString *NSStringFromIl2CppString(Il2CppString *str)
 static void (*orig_GUI_Label)(void*, void*, void*, void*);
 static void hook_GUI_Label(void *__this, void *position, void *textArg, void *method)
 {
+#if FORCE_BLOCK_ALL
+    // 【测试版】永久拦截，验证贝总工具是否走 IMGUI GUI.Label
+    return;
+#endif
     if (IsCapturedNow()) {
         NSString *txt = NSStringFromIl2CppString((Il2CppString *)textArg);
         if (ShouldHideText(txt)) {
@@ -127,6 +137,10 @@ static void hook_GUI_Label(void *__this, void *position, void *textArg, void *me
 static void (*orig_GUI_Box)(void*, void*, void*, void*);
 static void hook_GUI_Box(void *__this, void *position, void *textArg, void *method)
 {
+#if FORCE_BLOCK_ALL
+    // 【测试版】永久拦截，验证贝总工具是否走 IMGUI GUI.Box
+    return;
+#endif
     if (IsCapturedNow()) {
         NSString *txt = NSStringFromIl2CppString((Il2CppString *)textArg);
         if (ShouldHideText(txt)) {
