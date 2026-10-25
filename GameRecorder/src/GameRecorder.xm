@@ -248,14 +248,14 @@ static void hookGameAudio(void) {
         if ([n containsString:@"UnityFramework"] || [n containsString:@"ScarletWork"] ||
             [n containsString:@"CounterFlame"] || [n containsString:@"UnityPlayer"]) {
             rebind_symbols_image((void *)_dyld_get_image_header(i), _dyld_get_image_vmaddr_slide(i),
-                (struct rebinding[]){{@"AudioUnitSetProperty", (void *)my_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty}}, 1);
+                (struct rebinding[]){{ "AudioUnitSetProperty", (void *)my_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty }}, 1);
             rebound = YES;
             NSLog(@"[GameRecorder] 已针对镜像重绑音频符号: %@", n);
         }
     }
     if (!rebound) {
         // 兜底：找不到游戏镜像才做全进程重绑
-        rebind_symbols((struct rebinding[]){{@"AudioUnitSetProperty", (void *)my_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty}}, 1);
+        rebind_symbols((struct rebinding[]){{ "AudioUnitSetProperty", (void *)my_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty }}, 1);
         NSLog(@"[GameRecorder] 兜底全进程重绑音频符号");
     }
 }
