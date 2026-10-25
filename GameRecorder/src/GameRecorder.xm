@@ -35,7 +35,7 @@ static NSInteger gFrameCount;
 static CGSize gVideoSize;
 
 static CAMetalLayer *gGameLayer;
-static __weak id<CAMetalDrawable> gLastDrawable;
+static id prevGameDrawable;  // 上一帧游戏 drawable（已渲染完成，强引用保留待拷贝）
 
 static UIWindow *gBtnWindow;
 static UIView *gBtn;
@@ -44,7 +44,6 @@ static UIButton *gBtnLabel;
 #pragma mark - hook 原 IMP
 
 static id (*orig_nextDrawable)(id, SEL);
-static void (*orig_presentDrawable)(id, SEL, id);
 
 #pragma mark - 顶部视图控制器
 
@@ -206,16 +205,11 @@ static void stopRecording(void) {
 static id hook_nextDrawable(id self, SEL sel) {
     id d = orig_nextDrawable(self, sel);
     if (gRecording && self == gGameLayer) {
-        gLastDrawable = d;
+        // 延迟一帧：把上一帧（已渲染完成）的 drawable 拷贝进录制器
+        if (prevGameDrawable) captureDrawable(prevGameDrawable);
+        prevGameDrawable = d;  // 强引用保留本帧，供下一帧拷贝
     }
     return d;
-}
-
-static void hook_presentDrawable(id self, SEL sel, id drawable) {
-    orig_presentDrawable(self, sel, drawable);
-    if (gRecording && drawable == gLastDrawable) {
-        captureDrawable(drawable);
-    }
 }
 
 #pragma mark - 悬浮按钮
@@ -297,12 +291,10 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         gQueue = [gDevice newCommandQueue];
         CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, gDevice, NULL, &gTexCache);
 
+        // 保存原 IMP 后 swizzle（只 hook nextDrawable，延迟一帧拷贝）
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
-        Method m2 = class_getInstanceMethod([MTLCommandBuffer class], @selector(presentDrawable:));
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
-        if (m2) orig_presentDrawable = (void(*)(id,SEL,id))method_getImplementation(m2);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
-        if (m2) method_setImplementation(m2, (IMP)hook_presentDrawable);
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
