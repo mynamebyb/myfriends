@@ -40,7 +40,6 @@ static id prevGameDrawable;  // 上一帧游戏 drawable（已渲染完成，强
 static UIWindow *gBtnWindow;
 static UIView *gBtn;
 static UIButton *gBtnLabel;
-static GameRecorderController *gCtrl;  // 强引用保住按钮回调 target
 
 #pragma mark - hook 原 IMP
 
@@ -239,6 +238,8 @@ static id hook_nextDrawable(id self, SEL sel) {
     }
 }
 @end
+
+static GameRecorderController *gCtrl;  // 强引用保住按钮回调 target（类型定义后声明）
 
 static void setupButton(void) {
     NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
