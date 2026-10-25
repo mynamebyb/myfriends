@@ -11,7 +11,7 @@
 //  隐藏方式：录屏时清空 ImDrawData（CmdListsCount/TotalVtxCount/TotalIdxCount）后仍调用原函数，
 //  而非直接 return —— 避免 Metal 提交异常崩溃，同时使 ImGui 界面不渲染、游戏画面保留。
 //
-//  时机：延迟 3 秒 hook，避开启动期与贝总工具自身的 Dobby inline hook 初始化冲突。
+//  时机：延迟 20 秒 hook，避开启动画面与贝总悬浮窗首次渲染的临界点。
 //
 
 #import <Foundation/Foundation.h>
@@ -75,9 +75,9 @@ __attribute__((constructor)) static void HideLabelOnRecord_ctor(void)
 
         const char *sym = "_Z30ImGui_ImplMetal_RenderDrawDataP10ImDrawDataPU27objcproto16MTLCommandBuffer11objc_objectPU34objcproto23MTLRenderCommandEncoder11objc_object";
 
-        // 延迟 3 秒再 hook：启动画面期完全不干预，避免闪退；
-        // 游戏跑起来后 hook，录屏时隐藏贝总界面。
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+        // 延迟 20 秒再 hook：避开启动画面 + 贝总悬浮窗首次渲染的临界点；
+        // 等贝总工具完全稳定运行后再打补丁，避免闪退。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(20 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             void *target = dlsym(RTLD_DEFAULT, sym);
             if (!target) {
