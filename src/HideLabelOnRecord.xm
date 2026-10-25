@@ -1,12 +1,10 @@
 //
 //  HideLabelOnRecord.xm — standalone 注入 dylib
 //
-//  功能：隐藏「贝总 U3D 工具」叠加在 Unity 游戏上的界面（物体名、方框等）。
-//
-//  【诊断版】不依赖任何 hook 引擎，纯 UIKit：
-//  贝总悬浮窗是独立 UIWindow，游戏主画面在 keyWindow。
-//  永久隐藏除 keyWindow 外的所有 window → 行为可判定贝总窗口是否就是非主窗口。
-//  若生效，下一步改回「仅录屏时隐藏」。
+//  【加载验证版】在游戏窗口上加一个红色圆点，行为可判定 dylib 是否加载执行。
+//  同时保留「隐藏非 keyWindow」逻辑。
+//  - 看到红点 → dylib 已加载，问题在窗口识别
+//  - 看不到红点 → dylib 没加载，排查注入
 //
 
 #import <Foundation/Foundation.h>
@@ -16,12 +14,25 @@ __attribute__((constructor)) static void HideLabelOnRecord_ctor(void)
 {
     @autoreleasepool {
         dispatch_async(dispatch_get_main_queue(), ^{
-            NSLog(@"[hideonrecord] 诊断版已加载（永久隐藏非主窗口）");
+            UIApplication *app = [UIApplication sharedApplication];
+            NSArray *ws = app.windows;
+            if (!ws.count) {
+                NSLog(@"[hideonrecord] 无 window");
+                return;
+            }
+            // 加载验证：在第一个 window 左上角加红点
+            UIWindow *w0 = ws[0];
+            UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(20, 80, 30, 30)];
+            dot.backgroundColor = [UIColor redColor];
+            dot.layer.cornerRadius = 15;
+            dot.clipsToBounds = YES;
+            [w0 addSubview:dot];
+            NSLog(@"[hideonrecord] 红点已添加，dylib 加载成功");
+
+            // 隐藏非 keyWindow（诊断用）
             NSTimer *t = [NSTimer scheduledTimerWithTimeInterval:0.3
                                                           repeats:YES
                                                             block:^(NSTimer *timer) {
-                // 枚举所有 window，隐藏非 keyWindow（贝总悬浮窗 / 伪装计算器窗）
-                UIApplication *app = [UIApplication sharedApplication];
                 UIWindow *key = app.keyWindow;
                 for (UIWindow *w in app.windows) {
                     if (w != key && !w.hidden) {
