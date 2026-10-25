@@ -10,13 +10,18 @@
 //  隐藏方式：录屏时清空 ImDrawData（CmdListsCount/TotalVtxCount/TotalIdxCount）后仍调用原函数，
 //  而非直接 return —— 避免 Metal 提交异常崩溃，同时使 ImGui 界面不渲染、游戏画面保留。
 //
-//  录屏状态：主线程 NSTimer 每 0.5s 轮询写入全局 gCaptured（RenderDrawData 可能在渲染线程调用）。
+//  【测试版】PERM_CLEAR=1：永久清空 ImDrawData（不判断录屏），用于二分定位问题。
 //
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <dlfcn.h>
 #import <objc/message.h>
+
+#pragma mark - 测试开关
+
+// 测试版：=1 永久清空 ImDrawData（不判断录屏），用来二分定位是"录屏检测"还是"渲染路径"问题。
+#define PERM_CLEAR 1
 
 #pragma mark - Dobby hook（运行时解析，复用贝总工具自带 Dobby 引擎）
 
@@ -50,7 +55,6 @@ static bool IsCapturedNow(void)
 static void StartCapturedPoll(void)
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        // NSTimer 定时轮询，避免递归 block 的 retain-cycle 告警
         NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.5
                                                           repeats:YES
                                                             block:^(NSTimer *t) {
@@ -69,8 +73,8 @@ static RenderDrawDataFn orig_RenderDrawData;
 
 static void hook_RenderDrawData(void *drawData, void *cmdBuffer, void *cmdEncoder)
 {
-    if (gCaptured && drawData) {
-        // 正在录屏：把 ImDrawData 清空后仍调用原函数（不直接 return，避免 Metal 提交空 command buffer 崩溃）。
+    if ((PERM_CLEAR || gCaptured) && drawData) {
+        // 清空 ImDrawData 后仍调用原函数（不直接 return，避免 Metal 提交空 command buffer 崩溃）。
         // ImDrawData 64 位布局：CmdListsCount@16, TotalVtxCount@20, TotalIdxCount@24。
         *(int *)((char *)drawData + 16) = 0;  // CmdListsCount
         *(int *)((char *)drawData + 20) = 0;  // TotalVtxCount
@@ -92,10 +96,8 @@ __attribute__((constructor)) static void HideLabelOnRecord_ctor(void)
 
         const char *sym = "_Z30ImGui_ImplMetal_RenderDrawDataP10ImDrawDataPU27objcproto16MTLCommandBuffer11objc_objectPU34objcproto23MTLRenderCommandEncoder11objc_object";
 
-        // 主线程轮询录屏状态（解决渲染线程读不到捕获状态的问题）
         StartCapturedPoll();
 
-        // 延迟 5 秒再 hook，等贝总悬浮窗稳定运行后再打补丁。
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             void *target = dlsym(RTLD_DEFAULT, sym);
@@ -104,7 +106,7 @@ __attribute__((constructor)) static void HideLabelOnRecord_ctor(void)
                 return;
             }
             int rc = DobbyHook_fn(target, (void *)&hook_RenderDrawData, (void **)&orig_RenderDrawData);
-            NSLog(@"[hideonrecord] ✅ Dobby hook ImGui_ImplMetal_RenderDrawData rc=%d（录屏时隐藏）", rc);
+            NSLog(@"[hideonrecord] ✅ Dobby hook rc=%d（%@）", rc, PERM_CLEAR ? @"永久清空·测试版" : @"录屏时隐藏");
         });
     }
 }
