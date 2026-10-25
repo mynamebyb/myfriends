@@ -2,35 +2,39 @@ name: GameRecorder Build
 
 on:
   push:
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Setup Theos
+      - name: Setup Theos + SDK
         run: |
-          export THEOS="/Users/runner/work/_temp/theos"
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS" || true
-          ls "$THEOS/bin/make" >/dev/null 2>&1 || bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
-          brew install ldid xz || true
-
-      - name: Symlink Xcode SDK
-        run: |
-          export THEOS="/Users/runner/work/_temp/theos"
-          SDKPATH=$(xcrun --sdk iphoneos --show-sdk-path)
-          sudo mkdir -p "$THEOS/sdks"
-          sudo ln -sf "$SDKPATH" "$THEOS/sdks/iPhoneOS17.0.sdk"
-          echo "SDK=$SDKPATH"
+          export THEOS="${{ runner.temp }}/theos"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          echo "$THEOS/bin" >> "$GITHUB_PATH"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          # 直接软链 Xcode 自带 SDK，禁止 install-theos 下载 patched SDK
+          mkdir -p "$THEOS/sdks"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          ln -sfn "$SDK" "$THEOS/sdks/$(basename "$SDK")"
+          ls -la "$THEOS/sdks"
+          brew install ldid
 
       - name: Build
         working-directory: GameRecorder
         run: |
-          export THEOS="/Users/runner/work/_temp/theos"
           make clean || true
           make
+
+      - name: Verify
+        working-directory: GameRecorder
+        run: |
+          find .theos -name "*.dylib" -exec file {} \;
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
