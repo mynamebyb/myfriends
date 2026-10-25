@@ -26,8 +26,10 @@
 static id<MTLDevice> gDevice;
 static id<MTLCommandQueue> gQueue;
 static CVMetalTextureCacheRef gTexCache;
+static dispatch_queue_t gWriteQ;  // 串行写队列，避免 AVAssetWriter 并发崩溃
 
 static BOOL gRecording = NO;
+static BOOL gNeedInit = NO;      // 等待第一帧 drawable 初始化 writer
 static AVAssetWriter *gWriter;
 static AVAssetWriterInput *gInput;
 static AVAssetWriterInputPixelBufferAdaptor *gAdaptor;
@@ -35,6 +37,7 @@ static NSURL *gOutURL;
 static NSInteger gFrameCount;
 static CGSize gVideoSize;
 static double gStartTime;  // 录制开始时间（真实时间戳，避免慢动作）
+static int gFrameSkip;     // 限帧计数器（30fps）
 
 static CAMetalLayer *gGameLayer;
 static id prevGameDrawable;  // 上一帧游戏 drawable（已渲染完成，强引用保留待拷贝）
@@ -83,6 +86,43 @@ static CAMetalLayer *findGameLayer(void) {
     return best;
 }
 
+#pragma mark - 初始化录制（用 drawable.texture 真实尺寸，保证全屏）
+
+static BOOL initWriterFromSize(CGSize texSize) {
+    if (texSize.width <= 0 || texSize.height <= 0) return NO;
+    gVideoSize = texSize;  // 输出尺寸 = 游戏真实渲染像素，blit 全屏对齐
+
+    NSURL *tmp = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
+        [NSString stringWithFormat:@"rec_%ld.mp4", (long)[NSDate date].timeIntervalSince1970]]];
+    gOutURL = tmp;
+    NSError *err = nil;
+    gWriter = [AVAssetWriter assetWriterWithURL:tmp fileType:AVFileTypeMPEG4 error:&err];
+    if (!gWriter) { NSLog(@"[GameRecorder] writer 创建失败 %@", err); return NO; }
+    NSDictionary *os = @{
+        AVVideoCodecKey: AVVideoCodecTypeH264,
+        AVVideoWidthKey: @((int)gVideoSize.width),
+        AVVideoHeightKey: @((int)gVideoSize.height),
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(6 * 1024 * 1024),
+                                            AVVideoExpectedSourceFrameRateKey: @(30) }
+    };
+    gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
+    gInput.expectsMediaDataInRealTime = YES;
+    gAdaptor = [AVAssetWriterInputPixelBufferAdaptor assetWriterInputPixelBufferAdaptorWithAssetWriterInput:gInput
+        sourcePixelBufferAttributes:@{
+            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
+            (id)kCVPixelBufferWidthKey: @((int)gVideoSize.width),
+            (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height)
+        }];
+    [gWriter addInput:gInput];
+    if (![gWriter startWriting]) { NSLog(@"[GameRecorder] startWriting 失败"); return NO; }
+    [gWriter startSessionAtSourceTime:kCMTimeZero];
+    gFrameCount = 0;
+    gStartTime = CACurrentMediaTime();
+    gNeedInit = NO;
+    NSLog(@"[GameRecorder] 已用尺寸 %.0fx%.0f 初始化", gVideoSize.width, gVideoSize.height);
+    return YES;
+}
+
 #pragma mark - 编码
 
 static void writerWritePixelBuffer(CVPixelBufferRef pb) {
@@ -94,7 +134,14 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
 }
 
 static void captureDrawable(id<CAMetalDrawable> drawable) {
-    if (!gAdaptor || !gDevice || !gTexCache || !drawable.texture) return;
+    if (!drawable.texture) return;
+    // 第一帧用真实 texture 尺寸初始化
+    if (gNeedInit) {
+        if (!initWriterFromSize(CGSizeMake(drawable.texture.width, drawable.texture.height))) return;
+    }
+    if (!gInput || !gInput.isReadyForMoreMediaData || !gAdaptor) return;
+    if (!gDevice || !gTexCache) return;
+
     CVPixelBufferRef pb = NULL;
     CVReturn cv = CVPixelBufferPoolCreatePixelBuffer(NULL, gAdaptor.pixelBufferPool, &pb);
     if (cv != kCVReturnSuccess || !pb) return;
@@ -119,8 +166,11 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
               destinationOrigin:MTLOriginMake(0,0,0)];
     [blit endEncoding];
     [cb addCompletedHandler:^(id<MTLCommandBuffer> b){
-        writerWritePixelBuffer(pb);
-        CVPixelBufferRelease(pb);
+        // 串行写，避免并发崩溃
+        dispatch_async(gWriteQ, ^{
+            writerWritePixelBuffer(pb);
+            CVPixelBufferRelease(pb);
+        });
     }];
     [cb commit];
     if (mt) CFRelease(mt);
@@ -136,42 +186,10 @@ static void startRecording(void) {
         [topViewController() presentViewController:al animated:YES completion:nil];
         return;
     }
-    gVideoSize = CGSizeMake(gGameLayer.bounds.size.width * gGameLayer.contentsScale,
-                            gGameLayer.bounds.size.height * gGameLayer.contentsScale);  // 真实像素尺寸
-    if (gVideoSize.width <= 0) gVideoSize = gGameLayer.drawableSize;
-    if (gVideoSize.width > 1280) {
-        CGFloat ratio = 1280.0 / gVideoSize.width;
-        gVideoSize = CGSizeMake(1280, (NSInteger)(gVideoSize.height * ratio) & ~1);
-    }
-
-    NSURL *tmp = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"rec_%ld.mp4", (long)[NSDate date].timeIntervalSince1970]]];
-    gOutURL = tmp;
-    NSError *err = nil;
-    gWriter = [AVAssetWriter assetWriterWithURL:tmp fileType:AVFileTypeMPEG4 error:&err];
-    if (!gWriter) { NSLog(@"[GameRecorder] writer 创建失败 %@", err); return; }
-    NSDictionary *os = @{
-        AVVideoCodecKey: AVVideoCodecTypeH264,
-        AVVideoWidthKey: @((int)gVideoSize.width),
-        AVVideoHeightKey: @((int)gVideoSize.height),
-        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(3 * 1024 * 1024),
-                                            AVVideoExpectedSourceFrameRateKey: @(30) }
-    };
-    gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
-    gInput.expectsMediaDataInRealTime = YES;
-    gAdaptor = [AVAssetWriterInputPixelBufferAdaptor assetWriterInputPixelBufferAdaptorWithAssetWriterInput:gInput
-        sourcePixelBufferAttributes:@{
-            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
-            (id)kCVPixelBufferWidthKey: @((int)gVideoSize.width),
-            (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height)
-        }];
-    [gWriter addInput:gInput];
-    if (![gWriter startWriting]) { NSLog(@"[GameRecorder] startWriting 失败"); return; }
-    [gWriter startSessionAtSourceTime:kCMTimeZero];
-    gFrameCount = 0;
-    gStartTime = CACurrentMediaTime();
     gRecording = YES;
-    NSLog(@"[GameRecorder] 开始录制 %@", tmp.path);
+    gNeedInit = YES;   // 等第一帧 drawable 拿到真实尺寸再建 writer
+    gFrameSkip = 0;
+    NSLog(@"[GameRecorder] 开始录制（等待第一帧初始化）");
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -186,6 +204,10 @@ static void showShareForURL(NSURL *url) {
 static void stopRecording(void) {
     if (!gRecording) return;
     gRecording = NO;
+    if (!gAdaptor) {  // 还没开始写帧就停止
+        NSLog(@"[GameRecorder] 未开始写入即停止");
+        return;
+    }
     [gInput markAsFinished];
     AVAssetWriter *w = gWriter;
     NSURL *url = gOutURL;
@@ -210,8 +232,10 @@ static void stopRecording(void) {
 static id hook_nextDrawable(id self, SEL sel) {
     id d = orig_nextDrawable(self, sel);
     if (gRecording && self == gGameLayer) {
-        // 延迟一帧：把上一帧（已渲染完成）的 drawable 拷贝进录制器
-        if (prevGameDrawable) captureDrawable(prevGameDrawable);
+        // 限帧：每 2 帧捕获一次（约 30fps），避免编码堆积闪退
+        if (prevGameDrawable && (++gFrameSkip % 2 == 0)) {
+            captureDrawable(prevGameDrawable);
+        }
         prevGameDrawable = d;  // 强引用保留本帧，供下一帧拷贝
     }
     return d;
@@ -229,15 +253,21 @@ static id hook_nextDrawable(id self, SEL sel) {
 }
 - (void)btnPanned:(UIPanGestureRecognizer *)gr {
     UIView *b = gr.view;
+    const CGFloat half = 28;
     if (gr.state == UIGestureRecognizerStateBegan || gr.state == UIGestureRecognizerStateChanged) {
         CGPoint t = [gr translationInView:b.superview];
         b.center = CGPointMake(b.center.x + t.x, b.center.y + t.y);
         [gr setTranslation:CGPointZero inView:b.superview];
+        // clamp 在屏幕内，防止滑出屏外找不到
+        CGRect sv = b.superview.bounds;
+        CGPoint c = b.center;
+        if (sv.size.width > 0) c.x = MAX(half, MIN(sv.size.width - half, c.x));
+        if (sv.size.height > 0) c.y = MAX(half, MIN(sv.size.height - half, c.y));
+        b.center = c;
     } else if (gr.state == UIGestureRecognizerStateEnded) {
-        // 不保存位置：按钮固定初始位置，防止拖到屏幕外找不到
         CGRect f = gBtnWindow.frame;
-        f.origin.x = b.center.x - 28;
-        f.origin.y = b.center.y - 28;
+        f.origin.x = b.center.x - half;
+        f.origin.y = b.center.y - half;
         gBtnWindow.frame = f;
     }
 }
@@ -295,6 +325,7 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
         CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, gDevice, NULL, &gTexCache);
+        gWriteQ = dispatch_queue_create("GameRecorderWrite", DISPATCH_QUEUE_SERIAL);
 
         // 保存原 IMP 后 swizzle（只 hook nextDrawable，延迟一帧拷贝）
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
