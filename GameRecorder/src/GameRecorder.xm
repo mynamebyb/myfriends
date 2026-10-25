@@ -154,7 +154,7 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
     if (!gInput || !gInput.isReadyForMoreMediaData || !gAdaptor) return;
     if (!gDevice || !gTexCache) return;
 
-    // 限制在途 blit ≤ 2：避免过多 command buffer 引用 drawable 导致 pool 耗尽闪退
+    // 限制在途 blit ≤ 2：避免过多 command buffer 引用 drawable 导致池耗尽闪退
     if (__sync_fetch_and_add(&gInflightBlits, 1) >= 2) {
         __sync_fetch_and_sub(&gInflightBlits, 1);
         return;
@@ -175,8 +175,8 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
     CVMetalTextureRef mt = NULL;
     size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb);
     // 跟随源色彩空间，避免 sRGB/线性不匹配导致画面变暗
-    MTLPixelFormat targetFmt = (drawable.texture.pixelFormat == MTLPixelFormatBGRA8_sRGB)
-                               ? MTLPixelFormatBGRA8_sRGB : MTLPixelFormatBGRA8Unorm;
+    MTLPixelFormat targetFmt = (drawable.texture.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB)
+                               ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
     CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, gTexCache, pb, NULL,
                                               targetFmt, w, h, 0, &mt);
     id<MTLTexture> target = mt ? CVMetalTextureGetTexture(mt) : nil;
