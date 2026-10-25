@@ -172,8 +172,11 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
 
     CVMetalTextureRef mt = NULL;
     size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb);
+    // 跟随源色彩空间，避免 sRGB/线性不匹配导致画面变暗
+    MTLPixelFormat targetFmt = (drawable.texture.pixelFormat == MTLPixelFormatBGRA8_sRGB)
+                               ? MTLPixelFormatBGRA8_sRGB : MTLPixelFormatBGRA8Unorm;
     CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, gTexCache, pb, NULL,
-                                              MTLPixelFormatBGRA8Unorm, w, h, 0, &mt);
+                                              targetFmt, w, h, 0, &mt);
     id<MTLTexture> target = mt ? CVMetalTextureGetTexture(mt) : nil;
     if (!target) {
         if (mt) CFRelease(mt);
