@@ -1,0 +1,45 @@
+name: Build dylib (Theos)
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Theos
+        run: |
+          export THEOS="${{ runner.temp }}/theos"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          brew install ldid xz
+
+      - name: Download iPhoneOS SDK
+        run: |
+          export THEOS="${{ runner.temp }}/theos"
+          mkdir -p "$THEOS/sdks"
+          curl -L -o /tmp/iPhoneOS17.0.sdk.tar.xz \
+            https://github.com/xybp888/iOS-SDKs/releases/download/17.0/iPhoneOS17.0.sdk.tar.xz
+          tar -xJf /tmp/iPhoneOS17.0.sdk.tar.xz -C "$THEOS/sdks"
+
+      - name: Build
+        run: |
+          make clean || true
+          make
+
+      - name: Verify artifact
+        run: |
+          file .theos/obj/debug/libHideLabelOnRecord.dylib
+          nm -gU .theos/obj/debug/libHideLabelOnRecord.dylib | grep -i "constructor" || true
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: HideLabelOnRecord.dylib
+          path: .theos/obj/debug/libHideLabelOnRecord.dylib
+          if-no-files-found: error
