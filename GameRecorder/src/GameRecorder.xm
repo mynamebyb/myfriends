@@ -402,9 +402,10 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
 
-        // 轮询等 UI 就绪后建悬浮按钮
+        // 轮询等 UI 就绪后建悬浮按钮（用 __block 避免递归 block 自引用报错）
         __block int tries = 0;
-        dispatch_block_t poll = ^{
+        __block dispatch_block_t poll;
+        poll = ^{
             tries++;
             trySetupUI();
             if (!gBtnWindow && tries < 60) {
