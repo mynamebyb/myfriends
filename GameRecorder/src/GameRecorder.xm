@@ -3,7 +3,6 @@
 //
 //  版本：LC 内存优化版 · 540p / ~30fps / 1Mbps · 每 15 秒按真实时间分段 + 0.8s 释放间隔
 //  目标：把录制过程的内存增速压到最低（之前实测 ~47MB/s，2000MB 触顶闪退）
-//  内置内存日志：每 5 秒打印进程 RSS，便于确认增速是否下降。
 //
 //  注入：LiveContainer / Sideloadly / nbtool 重签名
 //  目标：com.ScarletWork.CounterFlame
@@ -20,17 +19,6 @@
 #import <Photos/Photos.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
-#import <mach/mach.h>
-
-#pragma mark - 进程内存(RSS)
-
-static size_t currentRSS(void) {
-    struct task_basic_info info;
-    mach_msg_type_number_t size = TASK_BASIC_INFO_COUNT;
-    if (task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&info, &size) == KERN_SUCCESS)
-        return info.resident_size;
-    return 0;
-}
 
 #pragma mark - 全局状态
 
@@ -277,7 +265,7 @@ static void startRecording(void) {
     gFrameSkip = 0;
     gSegIndex = 0;
     gNeedNewSegment = 0;
-    NSLog(@"[GameRecorder] 开始录制（540p/30fps/1M/15s分段 · RSS %.0fMB）", currentRSS()/1024.0/1024.0);
+    NSLog(@"[GameRecorder] 开始录制（540p/30fps/1M/15s分段）");
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -428,18 +416,5 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         };
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), poll);
-
-        // 每 5 秒打印一次进程 RSS，观察内存增速
-        __block int rssTicks = 0;
-        dispatch_block_t rssLog = ^{
-            rssTicks++;
-            NSLog(@"[GameRecorder] RSS %.0fMB 段 %d", currentRSS()/1024.0/1024.0, gSegIndex);
-            if (rssTicks < 120) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), rssLog);
-            }
-        };
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), rssLog);
     }
 }

@@ -1,47 +1,9 @@
-name: Build GameRecorder
-
+name: Legacy Build GameRecorder (deprecated)
 on:
-  push:
-    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: macos-14
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Theos + SDK
-        run: |
-          export THEOS="${{ runner.temp }}/theos"
-          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
-          echo "Adding $THEOS/bin to PATH" >> "$GITHUB_ENV"
-          echo "$THEOS/bin" >> "$GITHUB_PATH"
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
-          # 关键：clone 完立即用 Xcode 自带 SDK 软链，Theos 检测到 sdks 目录已有就不会去下载 patched SDK
-          mkdir -p "$THEOS/sdks"
-          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
-          echo "Using SDK: $SDK"
-          ln -sfn "$SDK" "$THEOS/sdks/$(basename "$SDK")"
-          ls -la "$THEOS/sdks"
-          brew install ldid
-
-      - name: Build GameRecorder
-        working-directory: GameRecorder
-        run: |
-          make clean || true
-          make
-
-      - name: Verify GameRecorder
-        working-directory: GameRecorder
-        run: |
-          find .theos -name "*.dylib" -exec file {} \;
-          nm -gU .theos/obj/debug/arm64/libGameRecorder.dylib | grep -i constructor || true
-
-      - name: Upload GameRecorder
-        uses: actions/upload-artifact@v4
-        with:
-          name: GameRecorder.dylib
-          path: GameRecorder/.theos/obj/debug/**/*.dylib
-          if-no-files-found: error
+      - run: echo "Deprecated workflow. Use gamerecorder.yml instead."
