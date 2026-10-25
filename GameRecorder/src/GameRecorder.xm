@@ -140,6 +140,8 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     double now = CACurrentMediaTime();
     CMTime pts = CMTimeMakeWithSeconds(now - gStartTime, 600);  // 真实时间戳，正常速度
     gFrameCount++;
+    // 定期 flush Metal 纹理缓存，防止长时间录制纹理泄漏导致内存上涨被系统杀掉
+    if ((gFrameCount % 60) == 0 && gTexCache) CVMetalTextureCacheFlush(gTexCache, 0);
     [gAdaptor appendPixelBuffer:pb withPresentationTime:pts];
 }
 
