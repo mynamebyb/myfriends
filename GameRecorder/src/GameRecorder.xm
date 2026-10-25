@@ -1,11 +1,11 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：自动分段录制版。每 35 秒自动结束当前片段、销毁 AVAssetWriter 释放编码器内存，
-//        再开新片段续录，避免内存持续累积触发 jetsam 闪退。
+//  版本：自签原生版（Sideloadly 注入）· 高画质 60fps / 720p / 4Mbps · 每 20 秒分段
+//  分段：每 20 秒自动结束当前片段、销毁 AVAssetWriter 释放编码器，再开新段续录。
 //        录完自动存相册，不再弹分享页面。
 //
-//  注入：LiveContainer + ElleKit / Sideloadly 重签名。
+//  注入：Sideloadly 重签名原生运行（LiveContainer 内存配额不够，已弃用）
 //  目标：com.ScarletWork.CounterFlame
 //
 
@@ -41,10 +41,10 @@ static double gStartTime;
 static int gFrameSkip;
 static int gInflightBlits;
 
-// 分段录制状态
-static int gSegIndex = 0;                 // 当前片段序号（文件名后缀）
-static int gNeedNewSegment = 0;           // 是否需要切段（atomic-ish）
-static const NSInteger gSegmentFrameLimit = 30 * 35;  // 每 35 秒切一段（@30fps = 1050 帧）
+// 分段录制状态：每 20 秒一段（@60fps = 1200 帧）
+static int gSegIndex = 0;
+static int gNeedNewSegment = 0;
+static const NSInteger gSegmentFrameLimit = 60 * 20;
 
 static CAMetalLayer *gGameLayer;
 static id prevGameDrawable;
@@ -52,8 +52,6 @@ static id prevGameDrawable;
 static UIWindow *gBtnWindow;
 static UIView *gBtn;
 static UIButton *gBtnLabel;
-
-#pragma mark - hook 原 IMP
 
 static id (*orig_nextDrawable)(id, SEL);
 
@@ -107,8 +105,8 @@ static BOOL initWriterWithSize(CGSize outSize) {
         AVVideoCodecKey: AVVideoCodecTypeHEVC,
         AVVideoWidthKey: @((int)gVideoSize.width),
         AVVideoHeightKey: @((int)gVideoSize.height),
-        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(1024 * 1024),   // 1Mbps：体积小，稳
-                                            AVVideoExpectedSourceFrameRateKey: @(30) }
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(4 * 1024 * 1024),  // 4Mbps 高画质
+                                            AVVideoExpectedSourceFrameRateKey: @(60) }
     };
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
     gInput.expectsMediaDataInRealTime = YES;
@@ -124,15 +122,15 @@ static BOOL initWriterWithSize(CGSize outSize) {
     gFrameCount = 0;
     gStartTime = CACurrentMediaTime();
     gNeedInit = NO;
-    NSLog(@"[GameRecorder] 段 %d 尺寸 %.0fx%.0f", gSegIndex, gVideoSize.width, gVideoSize.height);
+    NSLog(@"[GameRecorder] 段 %d 尺寸 %.0fx%.0f 60fps", gSegIndex, gVideoSize.width, gVideoSize.height);
     return YES;
 }
 
-// 从源纹理尺寸算出输出尺寸（压缩到 540 宽）再初始化
+// 从源纹理尺寸算出输出尺寸（压到 720 宽）再初始化
 static BOOL initWriterFromTexSize(CGSize texSize) {
     if (texSize.width <= 0 || texSize.height <= 0) return NO;
     CGSize out = texSize;
-    CGFloat targetW = 540;
+    CGFloat targetW = 720;
     if (out.width > targetW) {
         CGFloat ratio = targetW / out.width;
         out = CGSizeMake(targetW, (NSInteger)(out.height * ratio / 2) * 2);
@@ -187,8 +185,8 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     CMTime pts = CMTimeMakeWithSeconds(now - gStartTime, 600);
     [gAdaptor appendPixelBuffer:pb withPresentationTime:pts];
     gFrameCount++;
-    if ((gFrameCount % 60) == 0 && gTexCache) CVMetalTextureCacheFlush(gTexCache, 0);
-    // 分段：达到 35 秒帧数就切段，销毁编码器释放内存
+    if ((gFrameCount % 120) == 0 && gTexCache) CVMetalTextureCacheFlush(gTexCache, 0);
+    // 分段：达到 20 秒帧数就切段
     if (gFrameCount >= gSegmentFrameLimit && !gNeedNewSegment) {
         cutSegment();
     }
@@ -196,7 +194,6 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
 
 static void captureDrawable(id<CAMetalDrawable> drawable) {
     if (!drawable.texture) return;
-    // 切段进行中：暂停喂帧，等新 writer 就绪
     if (gNeedNewSegment) return;
     if (gNeedInit) {
         if (!initWriterFromTexSize(CGSizeMake(drawable.texture.width, drawable.texture.height))) return;
@@ -264,7 +261,7 @@ static void startRecording(void) {
     gFrameSkip = 0;
     gSegIndex = 0;
     gNeedNewSegment = 0;
-    NSLog(@"[GameRecorder] 开始录制（分段 35s）");
+    NSLog(@"[GameRecorder] 开始录制（分段 20s · 60fps · 720p）");
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -287,15 +284,12 @@ static void stopRecording(void) {
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"●" forState:UIControlStateNormal]; });
 }
 
-#pragma mark - Hook：捕获游戏画面
+#pragma mark - Hook：捕获游戏画面（60fps，每帧抓）
 
 static id hook_nextDrawable(id self, SEL sel) {
     id d = orig_nextDrawable(self, sel);
     if (gRecording && self == gGameLayer) {
-        // 限帧 ~30fps（每 2 帧捕获一次）+ 非阻塞丢帧
-        if (++gFrameSkip % 2 == 0 && prevGameDrawable) {
-            captureDrawable(prevGameDrawable);
-        }
+        if (prevGameDrawable) captureDrawable(prevGameDrawable);
         prevGameDrawable = d;
     }
     return d;
@@ -377,7 +371,7 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        NSLog(@"[GameRecorder] ✅ 已注入 %@（分段录制版）", bid);
+        NSLog(@"[GameRecorder] ✅ 已注入 %@（自签原生版 60fps/720p/4Mbps/20s分段）", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
