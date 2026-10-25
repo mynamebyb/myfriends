@@ -4,7 +4,7 @@
 //  功能：
 //   - 只录制游戏主画面（CAMetalLayer 的 drawable），贝总等独立 overlay 不在录制范围
 //   - AVAssetWriter 硬编码 H.264，录完弹系统分享半屏（可存相册/文件），并默认存相册
-//   - 悬浮按钮触发：可拖动、位置记忆（下次启动同位置）
+//   - 悬浮按钮触发
 //
 //  注入：LiveContainer + ElleKit / Sideloadly 重签名。
 //  目标：com.ScarletWork.CounterFlame
@@ -18,6 +18,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <AVFoundation/AVFoundation.h>
 #import <Photos/Photos.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
 #pragma mark - 全局状态
@@ -33,6 +34,7 @@ static AVAssetWriterInputPixelBufferAdaptor *gAdaptor;
 static NSURL *gOutURL;
 static NSInteger gFrameCount;
 static CGSize gVideoSize;
+static double gStartTime;  // 录制开始时间（真实时间戳，避免慢动作）
 
 static CAMetalLayer *gGameLayer;
 static id prevGameDrawable;  // 上一帧游戏 drawable（已渲染完成，强引用保留待拷贝）
@@ -85,7 +87,8 @@ static CAMetalLayer *findGameLayer(void) {
 
 static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     if (!gInput.isReadyForMoreMediaData) return;
-    CMTime pts = CMTimeMake(gFrameCount, 30);
+    double now = CACurrentMediaTime();
+    CMTime pts = CMTimeMakeWithSeconds(now - gStartTime, 600);  // 真实时间戳，正常速度
     gFrameCount++;
     [gAdaptor appendPixelBuffer:pb withPresentationTime:pts];
 }
@@ -133,8 +136,9 @@ static void startRecording(void) {
         [topViewController() presentViewController:al animated:YES completion:nil];
         return;
     }
-    gVideoSize = gGameLayer.drawableSize;
-    if (gVideoSize.width <= 0) gVideoSize = gGameLayer.bounds.size;
+    gVideoSize = CGSizeMake(gGameLayer.bounds.size.width * gGameLayer.contentsScale,
+                            gGameLayer.bounds.size.height * gGameLayer.contentsScale);  // 真实像素尺寸
+    if (gVideoSize.width <= 0) gVideoSize = gGameLayer.drawableSize;
     if (gVideoSize.width > 1280) {
         CGFloat ratio = 1280.0 / gVideoSize.width;
         gVideoSize = CGSizeMake(1280, (NSInteger)(gVideoSize.height * ratio) & ~1);
@@ -165,6 +169,7 @@ static void startRecording(void) {
     if (![gWriter startWriting]) { NSLog(@"[GameRecorder] startWriting 失败"); return; }
     [gWriter startSessionAtSourceTime:kCMTimeZero];
     gFrameCount = 0;
+    gStartTime = CACurrentMediaTime();
     gRecording = YES;
     NSLog(@"[GameRecorder] 开始录制 %@", tmp.path);
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
@@ -229,12 +234,11 @@ static id hook_nextDrawable(id self, SEL sel) {
         b.center = CGPointMake(b.center.x + t.x, b.center.y + t.y);
         [gr setTranslation:CGPointZero inView:b.superview];
     } else if (gr.state == UIGestureRecognizerStateEnded) {
+        // 不保存位置：按钮固定初始位置，防止拖到屏幕外找不到
         CGRect f = gBtnWindow.frame;
         f.origin.x = b.center.x - 28;
         f.origin.y = b.center.y - 28;
         gBtnWindow.frame = f;
-        [[NSUserDefaults standardUserDefaults] setFloat:f.origin.x forKey:@"GameRecorderBtnX"];
-        [[NSUserDefaults standardUserDefaults] setFloat:f.origin.y forKey:@"GameRecorderBtnY"];
     }
 }
 @end
@@ -242,9 +246,8 @@ static id hook_nextDrawable(id self, SEL sel) {
 static GameRecorderController *gCtrl;  // 强引用保住按钮回调 target（类型定义后声明）
 
 static void setupButton(void) {
-    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-    CGFloat x = [ud objectForKey:@"GameRecorderBtnX"] ? [ud floatForKey:@"GameRecorderBtnX"] : 40;
-    CGFloat y = [ud objectForKey:@"GameRecorderBtnY"] ? [ud floatForKey:@"GameRecorderBtnY"] : 300;
+    // 固定初始位置（不保存拖动位置，避免按钮跑到屏幕外找不到）
+    CGFloat x = 40, y = 300;
 
     gBtnWindow = [[UIWindow alloc] initWithFrame:CGRectMake(x, y, 56, 56)];
     gBtnWindow.windowLevel = UIWindowLevelStatusBar + 400;
