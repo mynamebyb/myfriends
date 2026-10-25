@@ -144,8 +144,8 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
 
     CVPixelBufferRef pb = NULL;
     // 非阻塞取帧：pool 满时跳过该帧，绝不阻塞游戏渲染线程（否则卡顿/占用暴涨/闪退）
-    NSDictionary *aux = @{ (id)kCVPixelBufferPoolAllocationFailurePolicyKey:
-                                   @(kCVPixelBufferPoolAllocationFailurePolicyDiscard) };
+    // 私有 API 用字面量：key="CVPixelBufferPoolAllocationFailurePolicy"，值 2=Discard
+    NSDictionary *aux = @{ (id)CFSTR("CVPixelBufferPoolAllocationFailurePolicy"): @(2) };
     CVReturn cv = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(NULL,
                                             gAdaptor.pixelBufferPool,
                                             (__bridge CFDictionaryRef)aux, &pb);
