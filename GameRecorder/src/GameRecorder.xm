@@ -1,9 +1,8 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：固定像素池加固版 · 720p / ~30fps / 3Mbps · 每 15 秒按真实时间分段
-//  稳态策略：像素池固定为 3 个 surface 全程复用（绝不扩张）+ 编码跟不上即丢帧
-//          + 修复 pb 引用泄漏（buffer 正确归还池）→ 录制期间内存锁在固定水位
+//  版本：基于稳定版 07ddf43（已修复 pb 引用泄漏）· 1080p(4:3 原画优先) / 60fps / 5Mbps · 每 120 秒按真实时间分段
+//  说明：本版仅在 07ddf43 基础上改参数（段长/帧率/分辨率/码率），其余稳态逻辑保持不变
 //
 //  注入：LiveContainer / Sideloadly / nbtool 重签名
 //  目标：com.ScarletWork.CounterFlame
@@ -42,10 +41,10 @@ static double gSegmentStart;
 static int gFrameSkip;
 static int gInflightBlits;
 
-// 分段录制状态：每 15 秒一段（按真实时间）
+// 分段录制状态：每 120 秒一段（按真实时间）
 static int gSegIndex = 0;
 static int gNeedNewSegment = 0;
-static const double gSegmentDuration = 15.0;
+static const double gSegmentDuration = 120.0;
 
 static CAMetalLayer *gGameLayer;
 static id prevGameDrawable;
@@ -107,18 +106,16 @@ static BOOL initWriterWithSize(CGSize outSize) {
         AVVideoCodecKey: AVVideoCodecTypeHEVC,
         AVVideoWidthKey: @((int)gVideoSize.width),
         AVVideoHeightKey: @((int)gVideoSize.height),
-        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(3 * 1024 * 1024),  // 3Mbps
-                                            AVVideoExpectedSourceFrameRateKey: @(30) }
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(5 * 1024 * 1024),  // 5Mbps
+                                            AVVideoExpectedSourceFrameRateKey: @(60) }
     };
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
     gInput.expectsMediaDataInRealTime = YES;
-    // 固定像素池：预分配 3 个 surface，全程复用不扩张
     gAdaptor = [AVAssetWriterInputPixelBufferAdaptor assetWriterInputPixelBufferAdaptorWithAssetWriterInput:gInput
         sourcePixelBufferAttributes:@{
             (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
             (id)kCVPixelBufferWidthKey: @((int)gVideoSize.width),
-            (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height),
-            (id)kCVPixelBufferPoolMinimumBufferCountKey: @(3)
+            (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height)
         }];
     [gWriter addInput:gInput];
     if (![gWriter startWriting]) { NSLog(@"[GameRecorder] startWriting 失败"); return NO; }
@@ -127,19 +124,20 @@ static BOOL initWriterWithSize(CGSize outSize) {
     gStartTime = CACurrentMediaTime();
     gSegmentStart = gStartTime;
     gNeedInit = NO;
-    NSLog(@"[GameRecorder] 段 %d 尺寸 %.0fx%.0f 30fps（固定池3）", gSegIndex, gVideoSize.width, gVideoSize.height);
+    NSLog(@"[GameRecorder] 段 %d 尺寸 %.0fx%.0f 60fps", gSegIndex, gVideoSize.width, gVideoSize.height);
     return YES;
 }
 
-// 从源纹理尺寸算出输出尺寸（压到 720 宽）再初始化
+// 从源纹理尺寸算出输出尺寸（1080p 优先，原画尽量保留）再初始化
 static BOOL initWriterFromTexSize(CGSize texSize) {
     if (texSize.width <= 0 || texSize.height <= 0) return NO;
     CGSize out = texSize;
-    CGFloat targetW = 1280;
-    if (out.width > targetW) {
-        CGFloat ratio = targetW / out.width;
-        out = CGSizeMake(targetW, (NSInteger)(out.height * ratio / 2) * 2);
+    CGFloat targetH = 1080;
+    if (out.height > targetH) {
+        CGFloat ratio = targetH / out.height;
+        out = CGSizeMake((NSInteger)(out.width * ratio / 2) * 2, targetH);
     }
+    // 源高度 ≤1080 时保持原尺寸（原画）
     return initWriterWithSize(out);
 }
 
@@ -193,7 +191,7 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     CMTime pts = CMTimeMakeWithSeconds(now - gStartTime, 600);
     [gAdaptor appendPixelBuffer:pb withPresentationTime:pts];
     gFrameCount++;
-    // 按真实时间每满 15 秒切段（不依赖帧数）
+    // 按真实时间每满 120 秒切段（不依赖帧数）
     if (!gNeedNewSegment && (now - gSegmentStart) >= gSegmentDuration) {
         cutSegment();
     }
@@ -208,7 +206,6 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
     if (!gInput || !gInput.isReadyForMoreMediaData || !gAdaptor) return;
     if (!gDevice || !gTexCache) return;
 
-    // 编码跟不上时直接丢帧（inflight≤2，避免编码积压涨内存）
     if (__sync_fetch_and_add(&gInflightBlits, 1) >= 2) {
         __sync_fetch_and_sub(&gInflightBlits, 1);
         return;
@@ -269,7 +266,7 @@ static void startRecording(void) {
     gFrameSkip = 0;
     gSegIndex = 0;
     gNeedNewSegment = 0;
-    NSLog(@"[GameRecorder] 开始录制（720p/30fps/3M/15s分段/固定池3）");
+    NSLog(@"[GameRecorder] 开始录制（1080p/60fps/5M/120s分段）");
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -296,12 +293,12 @@ static void stopRecording(void) {
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"●" forState:UIControlStateNormal]; });
 }
 
-#pragma mark - Hook：捕获游戏画面（每 2 帧抓 1，~30fps）
+#pragma mark - Hook：捕获游戏画面（每帧抓 1，追求 60fps；编码跟不上由 isReady 门控自动丢帧）
 
 static id hook_nextDrawable(id self, SEL sel) {
     id d = orig_nextDrawable(self, sel);
     if (gRecording && self == gGameLayer) {
-        if (gFrameSkip++ % 2 == 0 && prevGameDrawable) {
+        if (gFrameSkip++ % 1 == 0 && prevGameDrawable) {
             captureDrawable(prevGameDrawable);
         }
         prevGameDrawable = d;
@@ -413,7 +410,7 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        NSLog(@"[GameRecorder] ✅ 已注入 %@（720p/30fps/3M/固定池3，稳态版）", bid);
+        NSLog(@"[GameRecorder] ✅ 已注入 %@（1080p/60fps/5M/120s分段）", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
