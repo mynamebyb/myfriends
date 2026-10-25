@@ -14,6 +14,7 @@
 #import <UIKit/UIKit.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #import <CoreVideo/CoreVideo.h>
 #import <CoreMedia/CoreMedia.h>
 #import <AVFoundation/AVFoundation.h>
@@ -26,6 +27,7 @@
 static id<MTLDevice> gDevice;
 static id<MTLCommandQueue> gQueue;
 static CVMetalTextureCacheRef gTexCache;
+static MPSImageLanczosScale *gScaler;  // 分辨率缩放（降分辨率减编码负担）
 static dispatch_queue_t gWriteQ;  // 串行写队列，避免 AVAssetWriter 并发崩溃
 
 static BOOL gRecording = NO;
@@ -37,7 +39,7 @@ static NSURL *gOutURL;
 static NSInteger gFrameCount;
 static CGSize gVideoSize;
 static double gStartTime;  // 录制开始时间（真实时间戳，避免慢动作）
-static int gFrameSkip;     // 限帧计数器（10fps）
+static int gFrameSkip;     // 限帧计数器（保留）
 static int gInflightBlits; // 在途 blit command buffer 数（限制占用 drawable，防止池耗尽闪退）
 
 static CAMetalLayer *gGameLayer;
@@ -87,11 +89,18 @@ static CAMetalLayer *findGameLayer(void) {
     return best;
 }
 
-#pragma mark - 初始化录制（用 drawable.texture 真实尺寸，保证全屏）
+#pragma mark - 初始化录制（用 drawable.texture 真实尺寸，降分辨率）
 
 static BOOL initWriterFromSize(CGSize texSize) {
     if (texSize.width <= 0 || texSize.height <= 0) return NO;
-    gVideoSize = texSize;  // 输出尺寸 = 游戏真实渲染像素，blit 全屏对齐
+    // 降分辨率：目标宽度 720，保比例（偶数高），减编码负担
+    gVideoSize = texSize;
+    CGFloat targetW = 720;
+    if (gVideoSize.width > targetW) {
+        CGFloat ratio = targetW / gVideoSize.width;
+        gVideoSize = CGSizeMake(targetW, (NSInteger)(gVideoSize.height * ratio / 2) * 2);
+    }
+    gScaler = [[MPSImageLanczosScale alloc] initWithDevice:gDevice];
 
     NSURL *tmp = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
         [NSString stringWithFormat:@"rec_%ld.mp4", (long)[NSDate date].timeIntervalSince1970]]];
@@ -103,8 +112,8 @@ static BOOL initWriterFromSize(CGSize texSize) {
         AVVideoCodecKey: AVVideoCodecTypeH264,
         AVVideoWidthKey: @((int)gVideoSize.width),
         AVVideoHeightKey: @((int)gVideoSize.height),
-        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(4 * 1024 * 1024),
-                                            AVVideoExpectedSourceFrameRateKey: @(10) }
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(6 * 1024 * 1024),
+                                            AVVideoExpectedSourceFrameRateKey: @(55) }
     };
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
     gInput.expectsMediaDataInRealTime = YES;
@@ -174,13 +183,18 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
     }
     CVPixelBufferRetain(pb);
     id<MTLCommandBuffer> cb = [gQueue commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-    [blit copyFromTexture:drawable.texture
-              sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
-              sourceSize:MTLSizeMake(drawable.texture.width, drawable.texture.height, 1)
-              toTexture:target destinationSlice:0 destinationLevel:0
-              destinationOrigin:MTLOriginMake(0,0,0)];
-    [blit endEncoding];
+    // 用 MPS Lanczos 缩放 drawable.texture → 目标小分辨率（降编码负担）
+    if (gScaler) {
+        [gScaler encodeToCommandBuffer:cb sourceTexture:drawable.texture destinationTexture:target];
+    } else {
+        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+        [blit copyFromTexture:drawable.texture
+                  sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+                  sourceSize:MTLSizeMake(drawable.texture.width, drawable.texture.height, 1)
+                  toTexture:target destinationSlice:0 destinationLevel:0
+                  destinationOrigin:MTLOriginMake(0,0,0)];
+        [blit endEncoding];
+    }
     [cb addCompletedHandler:^(id<MTLCommandBuffer> b){
         // 串行写，避免并发崩溃；完成后释放该在途名额
         dispatch_async(gWriteQ, ^{
@@ -250,8 +264,8 @@ static void stopRecording(void) {
 static id hook_nextDrawable(id self, SEL sel) {
     id d = orig_nextDrawable(self, sel);
     if (gRecording && self == gGameLayer) {
-        // 限帧：每 6 帧捕获一次（约 10fps），降低在途占用
-        if (prevGameDrawable && (++gFrameSkip % 6 == 0)) {
+        // 高帧率：每帧捕获（跟随游戏帧率，约55~60fps），720p 编码负担小
+        if (prevGameDrawable) {
             captureDrawable(prevGameDrawable);
         }
         prevGameDrawable = d;  // 强引用保留本帧，供下一帧拷贝
