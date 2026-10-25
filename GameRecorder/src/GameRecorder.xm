@@ -3,7 +3,7 @@
 //
 //  功能：
 //   - 只录制游戏主画面（CAMetalLayer 的 drawable），贝总等独立 overlay 不在录制范围
-//   - AVAssetWriter 硬编码 H.264，录完弹系统分享半屏（可存相册/文件），并默认存相册
+//   - AVAssetWriter 硬编码 HEVC，录完弹系统分享半屏（可存相册/文件），并默认存相册
 //   - 悬浮按钮触发
 //
 //  注入：LiveContainer + ElleKit / Sideloadly 重签名。
@@ -109,10 +109,10 @@ static BOOL initWriterFromSize(CGSize texSize) {
     gWriter = [AVAssetWriter assetWriterWithURL:tmp fileType:AVFileTypeMPEG4 error:&err];
     if (!gWriter) { NSLog(@"[GameRecorder] writer 创建失败 %@", err); return NO; }
     NSDictionary *os = @{
-        AVVideoCodecKey: AVVideoCodecTypeH264,
+        AVVideoCodecKey: AVVideoCodecTypeHEVC,   // HEVC 硬编码：压缩率高、码率低、更稳
         AVVideoWidthKey: @((int)gVideoSize.width),
         AVVideoHeightKey: @((int)gVideoSize.height),
-        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(3 * 1024 * 1024),
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(2 * 1024 * 1024),
                                             AVVideoExpectedSourceFrameRateKey: @(30) }
     };
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
