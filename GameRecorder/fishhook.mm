@@ -57,9 +57,9 @@ static void perform_rebinding_with_slide(struct rebindings_entry *rebindings,
       char *symbol_name = strtab + strtab_offset;
       if ((symtab[symtab_index].n_type & N_STAB) &&
           strcmp(symbol_name + 1, cur->rebindings[i].name) == 0) {
-        cur->rebindings[i].replaced = &indirect_symbol_bindings[i];
+        cur->rebindings[i].replaced = (void **)&indirect_symbol_bindings[i];
         *cur->rebindings[i].replaced =
-            (void *)cur->rebindings[i].replacement + slide;
+            (void *)((uintptr_t)cur->rebindings[i].replacement + slide);
       }
     }
   }
@@ -91,7 +91,7 @@ static void rebind_symbols_for_image(const struct mach_header *header,
   }
 
   for (uint32_t i = 0; i < segment_count; i++) {
-    if (cur_seg_cmd->cmd == LC_SEGMENT_ARCH_DEPENDENT &&
+    if (cur_seg_cmd->cmd == LC_SEGMENT_64 &&
         strcmp(cur_seg_cmd->segname, SEG_LINKEDIT) == 0) {
       linkedit_segment = cur_seg_cmd;
     } else if (cur_seg_cmd->cmd == LC_SYMTAB) {
