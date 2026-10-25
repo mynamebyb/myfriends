@@ -1,0 +1,52 @@
+name: Build GameRecorder Variants
+on:
+  push:
+    paths:
+      - 'GameRecorderV1/**'
+      - 'GameRecorderV2/**'
+      - 'GameRecorderV4/**'
+      - '.github/workflows/gamerecorder-variants.yml'
+    branches: [main, master]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Theos
+        run: |
+          export THEOS="/Users/runner/work/_temp/theos"
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS" || true
+          ls "$THEOS/bin/make" >/dev/null 2>&1 || bash -c "$(curl -fsSL https://raw.githubusercontent.com/theos/theos/master/bin/install-theos)"
+          brew install ldid xz || true
+      - name: Symlink SDK
+        run: |
+          export THEOS="/Users/runner/work/_temp/theos"
+          SDKPATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          sudo mkdir -p "$THEOS/sdks"
+          sudo ln -sf "$SDKPATH" "$THEOS/sdks/iPhoneOS17.0.sdk"
+      - name: Build all variants
+        run: |
+          export THEOS="/Users/runner/work/_temp/theos"
+          for v in GameRecorderV1 GameRecorderV2 GameRecorderV4; do
+            echo "=== Building $v ==="
+            (cd "$v" && make clean || true && make) || echo "BUILD FAILED $v"
+          done
+      - name: Upload V1
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameRecorderV1.dylib
+          path: GameRecorderV1/.theos/obj/debug/**/*.dylib
+          if-no-files-found: warn
+      - name: Upload V2
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameRecorderV2.dylib
+          path: GameRecorderV2/.theos/obj/debug/**/*.dylib
+          if-no-files-found: warn
+      - name: Upload V4
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameRecorderV4.dylib
+          path: GameRecorderV4/.theos/obj/debug/**/*.dylib
+          if-no-files-found: warn
