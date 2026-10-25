@@ -6,7 +6,7 @@ include $(THEOS)/makefiles/common.mk
 
 LIBRARY_NAME = GameRecorder
 GameRecorder_FILES = src/GameRecorder.xm
-GameRecorder_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-variable -Wno-arc-performSelector-leaks
+GameRecorder_CFLAGS = -fobjc-arc -std=gnu++11 -Wno-deprecated-declarations -Wno-unused-variable -Wno-arc-performSelector-leaks
 GameRecorder_FRAMEWORKS = Foundation UIKit AVFoundation Metal MetalKit CoreVideo CoreMedia Photos
 GameRecorder_LDFLAGS = -Wno-unused-dylib
 
