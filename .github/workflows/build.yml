@@ -19,13 +19,14 @@ jobs:
           git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
           brew install ldid xz
 
-      - name: Download iPhoneOS SDK
+      - name: Use Xcode bundled iPhoneOS SDK
         run: |
           export THEOS="${{ runner.temp }}/theos"
           mkdir -p "$THEOS/sdks"
-          curl -L -o /tmp/iPhoneOS17.0.sdk.tar.xz \
-            https://github.com/xybp888/iOS-SDKs/releases/download/17.0/iPhoneOS17.0.sdk.tar.xz
-          tar -xJf /tmp/iPhoneOS17.0.sdk.tar.xz -C "$THEOS/sdks"
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "Using SDK: $SDK"
+          # 把 Xcode 自带的 iphoneos SDK 链接进 theos/sdks，免下载第三方 SDK
+          ln -sfn "$SDK" "$THEOS/sdks/$(basename "$SDK")"
 
       - name: Build
         run: |
