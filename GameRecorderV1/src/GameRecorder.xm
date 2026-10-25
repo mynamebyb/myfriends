@@ -1,6 +1,6 @@
 //
-//  GameRecorderV1 (takeone) — 版本1：写队列排队限流
-//  待写帧堆积计数 ≥2 就跳过新画面，防止编码数据在内存里越堆越多顶到上限闪退。
+//  takeone — 版本1：写队列排队限流（待写帧≥2 就停抓新画面）
+//  埋点：日志前缀 [takeone]，按钮初始显示数字 1（红色）。
 //
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -31,7 +31,7 @@ static CGSize gVideoSize;
 static double gStartTime;
 static int gFrameSkip;
 static int gInflightBlits;
-static int gPendingWrites;  // 版本1：写队列里排队未完成的帧数
+static int gPendingWrites;
 
 static CAMetalLayer *gGameLayer;
 static id prevGameDrawable;
@@ -50,19 +50,16 @@ static UIViewController *topViewController(void) {
 }
 
 static CAMetalLayer *findGameLayer(void) {
-    CAMetalLayer *best = nil;
-    CGFloat bestArea = 0;
+    CAMetalLayer *best = nil; CGFloat bestArea = 0;
     for (UIWindow *w in [UIApplication sharedApplication].windows) {
         if (w.hidden) continue;
         UIView *rv = w.rootViewController.view;
         if (!rv) continue;
         NSMutableArray *stack = [NSMutableArray arrayWithObject:rv];
         while (stack.count) {
-            UIView *cur = stack.lastObject;
-            [stack removeLastObject];
+            UIView *cur = stack.lastObject; [stack removeLastObject];
             if ([cur.layer isKindOfClass:[CAMetalLayer class]]) {
-                CGRect b = cur.bounds;
-                CGFloat a = b.size.width * b.size.height;
+                CGRect b = cur.bounds; CGFloat a = b.size.width * b.size.height;
                 if (a > bestArea) { bestArea = a; best = (CAMetalLayer *)cur.layer; }
             }
             for (UIView *sv in cur.subviews) [stack addObject:sv];
@@ -81,11 +78,11 @@ static BOOL initWriterFromSize(CGSize texSize) {
     }
     gScaler = [[MPSImageLanczosScale alloc] initWithDevice:gDevice];
     NSURL *tmp = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"recV1_%ld.mp4", (long)[NSDate date].timeIntervalSince1970]]];
+        [NSString stringWithFormat:@"rec_takeone_%ld.mp4", (long)[NSDate date].timeIntervalSince1970]]];
     gOutURL = tmp;
     NSError *err = nil;
     gWriter = [AVAssetWriter assetWriterWithURL:tmp fileType:AVFileTypeMPEG4 error:&err];
-    if (!gWriter) { NSLog(@"[GRV1] writer 失败 %@", err); return NO; }
+    if (!gWriter) { NSLog(@"[takeone] writer 失败 %@", err); return NO; }
     NSDictionary *os = @{
         AVVideoCodecKey: AVVideoCodecTypeHEVC,
         AVVideoWidthKey: @((int)gVideoSize.width),
@@ -102,12 +99,12 @@ static BOOL initWriterFromSize(CGSize texSize) {
             (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height)
         }];
     [gWriter addInput:gInput];
-    if (![gWriter startWriting]) { NSLog(@"[GRV1] startWriting 失败"); return NO; }
+    if (![gWriter startWriting]) { NSLog(@"[takeone] startWriting 失败"); return NO; }
     [gWriter startSessionAtSourceTime:kCMTimeZero];
     gFrameCount = 0;
     gStartTime = CACurrentMediaTime();
     gNeedInit = NO;
-    NSLog(@"[GRV1] 尺寸 %.0fx%.0f", gVideoSize.width, gVideoSize.height);
+    NSLog(@"[takeone] 尺寸 %.0fx%.0f", gVideoSize.width, gVideoSize.height);
     return YES;
 }
 
@@ -127,42 +124,28 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
     }
     if (!gInput || !gInput.isReadyForMoreMediaData || !gAdaptor) return;
     if (!gDevice || !gTexCache) return;
-
-    // 版本1核心：写队列排队帧数 ≥2 就跳过本帧，阻止编码数据在内存堆积
+    // takeone 核心：写队列待写帧≥2 就跳过本帧，防止编码数据在内存堆积
     if (__sync_fetch_and_add(&gPendingWrites, 1) >= 2) {
         __sync_fetch_and_sub(&gPendingWrites, 1);
         return;
     }
-
     if (__sync_fetch_and_add(&gInflightBlits, 1) >= 2) {
         __sync_fetch_and_sub(&gInflightBlits, 1);
         __sync_fetch_and_sub(&gPendingWrites, 1);
         return;
     }
-
     CVPixelBufferRef pb = NULL;
     NSDictionary *aux = @{ (id)CFSTR("CVPixelBufferPoolAllocationFailurePolicy"): @(2) };
     CVReturn cv = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(NULL, gAdaptor.pixelBufferPool,
                                             (__bridge CFDictionaryRef)aux, &pb);
-    if (cv != kCVReturnSuccess || !pb) {
-        __sync_fetch_and_sub(&gInflightBlits, 1);
-        __sync_fetch_and_sub(&gPendingWrites, 1);
-        return;
-    }
-
+    if (cv != kCVReturnSuccess || !pb) { __sync_fetch_and_sub(&gInflightBlits, 1); __sync_fetch_and_sub(&gPendingWrites, 1); return; }
     CVMetalTextureRef mt = NULL;
     size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb);
     MTLPixelFormat targetFmt = (drawable.texture.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB)
                                ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
     CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, gTexCache, pb, NULL, targetFmt, w, h, 0, &mt);
     id<MTLTexture> target = mt ? CVMetalTextureGetTexture(mt) : nil;
-    if (!target) {
-        if (mt) CFRelease(mt);
-        CVPixelBufferRelease(pb);
-        __sync_fetch_and_sub(&gInflightBlits, 1);
-        __sync_fetch_and_sub(&gPendingWrites, 1);
-        return;
-    }
+    if (!target) { if (mt) CFRelease(mt); CVPixelBufferRelease(pb); __sync_fetch_and_sub(&gInflightBlits, 1); __sync_fetch_and_sub(&gPendingWrites, 1); return; }
     CVPixelBufferRetain(pb);
     id<MTLCommandBuffer> cb = [gQueue commandBuffer];
     if (gScaler) {
@@ -190,16 +173,13 @@ static void startRecording(void) {
     if (gRecording) return;
     if (!gGameLayer) gGameLayer = findGameLayer();
     if (!gGameLayer) {
-        UIAlertController *al = [UIAlertController alertControllerWithTitle:@"GameRecorderV1" message:@"未找到游戏画面" preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *al = [UIAlertController alertControllerWithTitle:@"takeone" message:@"未找到游戏画面" preferredStyle:UIAlertControllerStyleAlert];
         [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
         [topViewController() presentViewController:al animated:YES completion:nil];
         return;
     }
-    gRecording = YES;
-    gNeedInit = YES;
-    gFrameSkip = 0;
-    gPendingWrites = 0;
-    NSLog(@"[GRV1] 开始录制");
+    gRecording = YES; gNeedInit = YES; gFrameSkip = 0; gPendingWrites = 0;
+    NSLog(@"[takeone] 开始录制");
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -212,20 +192,17 @@ static void showShareForURL(NSURL *url) {
 static void stopRecording(void) {
     if (!gRecording) return;
     gRecording = NO;
-    if (!gAdaptor) { NSLog(@"[GRV1] 未写入即停"); return; }
+    if (!gAdaptor) { NSLog(@"[takeone] 未写入即停"); return; }
     [gInput markAsFinished];
-    AVAssetWriter *w = gWriter;
-    NSURL *url = gOutURL;
+    AVAssetWriter *w = gWriter; NSURL *url = gOutURL;
     [w finishWritingWithCompletionHandler:^{
-        if (w.status != AVAssetWriterStatusCompleted) { NSLog(@"[GRV1] 未完成 %ld", (long)w.status); return; }
-        NSLog(@"[GRV1] 完成 %@", url.path);
+        if (w.status != AVAssetWriterStatusCompleted) { NSLog(@"[takeone] 未完成 %ld", (long)w.status); return; }
+        NSLog(@"[takeone] 完成 %@", url.path);
         [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
             [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:url];
-        } completionHandler:^(BOOL ok, NSError *err) {
-            showShareForURL(url);
-        }];
+        } completionHandler:^(BOOL ok, NSError *err) { showShareForURL(url); }];
     }];
-    dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"●" forState:UIControlStateNormal]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"1" forState:UIControlStateNormal]; });
 }
 
 static id hook_nextDrawable(id self, SEL sel) {
@@ -264,16 +241,14 @@ static void setupButton(void) {
     CGFloat x = 40, y = 300;
     gBtnWindow = [[UIWindow alloc] initWithFrame:CGRectMake(x, y, 56, 56)];
     gBtnWindow.windowLevel = UIWindowLevelStatusBar + 400;
-    gBtnWindow.backgroundColor = [UIColor clearColor];
-    gBtnWindow.userInteractionEnabled = YES;
+    gBtnWindow.backgroundColor = [UIColor clearColor]; gBtnWindow.userInteractionEnabled = YES;
     gBtn = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 56, 56)];
     gBtn.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.55];
     gBtn.layer.cornerRadius = 28; gBtn.layer.borderColor = [UIColor whiteColor].CGColor; gBtn.layer.borderWidth = 1;
     gBtn.userInteractionEnabled = YES;
-    gBtnLabel = [UIButton buttonWithType:UIButtonTypeSystem];
-    gBtnLabel.frame = gBtn.bounds;
-    [gBtnLabel setTitle:@"●" forState:UIControlStateNormal];
-    gBtnLabel.titleLabel.font = [UIFont systemFontOfSize:26];
+    gBtnLabel = [UIButton buttonWithType:UIButtonTypeSystem]; gBtnLabel.frame = gBtn.bounds;
+    [gBtnLabel setTitle:@"1" forState:UIControlStateNormal];   // 版本标记：数字1（红色=takeone）
+    gBtnLabel.titleLabel.font = [UIFont systemFontOfSize:24];
     gBtnLabel.tintColor = [UIColor redColor];
     gCtrl = [GameRecorderController new];
     [gBtnLabel addTarget:gCtrl action:@selector(btnTapped) forControlEvents:UIControlEventTouchUpInside];
@@ -287,18 +262,18 @@ static void setupButton(void) {
 __attribute__((constructor)) static void ctor(void) {
     @autoreleasepool {
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-        if (![bid isEqualToString:@"com.ScarletWork.CounterFlame"]) { NSLog(@"[GRV1] 非目标 %@", bid); return; }
-        NSLog(@"[GRV1] ✅ 注入 %@", bid);
+        if (![bid isEqualToString:@"com.ScarletWork.CounterFlame"]) { NSLog(@"[takeone] 非目标 %@", bid); return; }
+        NSLog(@"[takeone] ✅ 已注入 %@ (takeone)", bid);
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
         CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, gDevice, NULL, &gTexCache);
-        gWriteQ = dispatch_queue_create("GameRecorderV1Write", DISPATCH_QUEUE_SERIAL);
+        gWriteQ = dispatch_queue_create("takeoneWrite", DISPATCH_QUEUE_SERIAL);
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             gGameLayer = findGameLayer();
-            NSLog(@"[GRV1] layer %@", gGameLayer);
+            NSLog(@"[takeone] layer %@", gGameLayer);
             setupButton();
         });
     }

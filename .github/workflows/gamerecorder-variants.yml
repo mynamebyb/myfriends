@@ -25,28 +25,29 @@ jobs:
           SDKPATH=$(xcrun --sdk iphoneos --show-sdk-path)
           sudo mkdir -p "$THEOS/sdks"
           sudo ln -sf "$SDKPATH" "$THEOS/sdks/iPhoneOS17.0.sdk"
-      - name: Build all variants
+      - name: Build all variants (clean each)
         run: |
           export THEOS="/Users/runner/work/_temp/theos"
           for v in GameRecorderV1 GameRecorderV2 GameRecorderV4; do
             echo "=== Building $v ==="
-            (cd "$v" && make clean || true && make) || echo "BUILD FAILED $v"
+            rm -rf "$v/.theos"
+            (cd "$v" && make) || echo "BUILD FAILED $v"
           done
-      - name: Upload V1
+      - name: Upload takeone
         uses: actions/upload-artifact@v4
         with:
-          name: GameRecorderV1.dylib
+          name: GameRecorder_takeone.dylib
           path: GameRecorderV1/.theos/obj/debug/**/*.dylib
           if-no-files-found: warn
-      - name: Upload V2
+      - name: Upload taketwo
         uses: actions/upload-artifact@v4
         with:
-          name: GameRecorderV2.dylib
+          name: GameRecorder_taketwo.dylib
           path: GameRecorderV2/.theos/obj/debug/**/*.dylib
           if-no-files-found: warn
-      - name: Upload V4
+      - name: Upload takefour
         uses: actions/upload-artifact@v4
         with:
-          name: GameRecorderV4.dylib
+          name: GameRecorder_takefour.dylib
           path: GameRecorderV4/.theos/obj/debug/**/*.dylib
           if-no-files-found: warn

@@ -1,6 +1,6 @@
 //
-//  GameRecorderV2 (taketwo) — 版本2：每30秒强制 flush 编码器缓冲到磁盘
-//  周期刷盘清内存，避免编码样本在内存里越攒越多顶到上限闪退。
+//  taketwo — 版本2：每30秒强制 flush 编码器缓冲到磁盘
+//  埋点：日志前缀 [taketwo]，按钮初始显示数字 2（绿色）。
 //
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -77,11 +77,11 @@ static BOOL initWriterFromSize(CGSize texSize) {
     }
     gScaler = [[MPSImageLanczosScale alloc] initWithDevice:gDevice];
     NSURL *tmp = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"recV2_%ld.mp4", (long)[NSDate date].timeIntervalSince1970]]];
+        [NSString stringWithFormat:@"rec_taketwo_%ld.mp4", (long)[NSDate date].timeIntervalSince1970]]];
     gOutURL = tmp;
     NSError *err = nil;
     gWriter = [AVAssetWriter assetWriterWithURL:tmp fileType:AVFileTypeMPEG4 error:&err];
-    if (!gWriter) { NSLog(@"[GRV2] writer 失败 %@", err); return NO; }
+    if (!gWriter) { NSLog(@"[taketwo] writer 失败 %@", err); return NO; }
     NSDictionary *os = @{
         AVVideoCodecKey: AVVideoCodecTypeHEVC,
         AVVideoWidthKey: @((int)gVideoSize.width),
@@ -98,12 +98,12 @@ static BOOL initWriterFromSize(CGSize texSize) {
             (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height)
         }];
     [gWriter addInput:gInput];
-    if (![gWriter startWriting]) { NSLog(@"[GRV2] startWriting 失败"); return NO; }
+    if (![gWriter startWriting]) { NSLog(@"[taketwo] startWriting 失败"); return NO; }
     [gWriter startSessionAtSourceTime:kCMTimeZero];
     gFrameCount = 0;
     gStartTime = CACurrentMediaTime();
     gNeedInit = NO;
-    NSLog(@"[GRV2] 尺寸 %.0fx%.0f", gVideoSize.width, gVideoSize.height);
+    NSLog(@"[taketwo] 尺寸 %.0fx%.0f", gVideoSize.width, gVideoSize.height);
     return YES;
 }
 
@@ -113,7 +113,7 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     CMTime pts = CMTimeMakeWithSeconds(now - gStartTime, 600);
     gFrameCount++;
     if ((gFrameCount % 60) == 0 && gTexCache) CVMetalTextureCacheFlush(gTexCache, 0);
-    // 版本2核心：每 900 帧(≈30秒@30fps) 强制 flush 编码器缓冲到磁盘，释放内存
+    // taketwo 核心：每 900 帧(≈30秒) 强制 flush 编码缓冲到磁盘，释放内存
     if ((gFrameCount % (30*30)) == 0) [gWriter flush];
     [gAdaptor appendPixelBuffer:pb withPresentationTime:pts];
 }
@@ -167,13 +167,13 @@ static void startRecording(void) {
     if (gRecording) return;
     if (!gGameLayer) gGameLayer = findGameLayer();
     if (!gGameLayer) {
-        UIAlertController *al = [UIAlertController alertControllerWithTitle:@"GameRecorderV2" message:@"未找到游戏画面" preferredStyle:UIAlertControllerStyleAlert];
+        UIAlertController *al = [UIAlertController alertControllerWithTitle:@"taketwo" message:@"未找到游戏画面" preferredStyle:UIAlertControllerStyleAlert];
         [al addAction:[UIAlertAction actionWithTitle:@"好" style:UIAlertActionStyleDefault handler:nil]];
         [topViewController() presentViewController:al animated:YES completion:nil];
         return;
     }
     gRecording = YES; gNeedInit = YES; gFrameSkip = 0;
-    NSLog(@"[GRV2] 开始录制");
+    NSLog(@"[taketwo] 开始录制");
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -186,17 +186,17 @@ static void showShareForURL(NSURL *url) {
 static void stopRecording(void) {
     if (!gRecording) return;
     gRecording = NO;
-    if (!gAdaptor) { NSLog(@"[GRV2] 未写入即停"); return; }
+    if (!gAdaptor) { NSLog(@"[taketwo] 未写入即停"); return; }
     [gInput markAsFinished];
     AVAssetWriter *w = gWriter; NSURL *url = gOutURL;
     [w finishWritingWithCompletionHandler:^{
-        if (w.status != AVAssetWriterStatusCompleted) { NSLog(@"[GRV2] 未完成 %ld", (long)w.status); return; }
-        NSLog(@"[GRV2] 完成 %@", url.path);
+        if (w.status != AVAssetWriterStatusCompleted) { NSLog(@"[taketwo] 未完成 %ld", (long)w.status); return; }
+        NSLog(@"[taketwo] 完成 %@", url.path);
         [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
             [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:url];
         } completionHandler:^(BOOL ok, NSError *err) { showShareForURL(url); }];
     }];
-    dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"●" forState:UIControlStateNormal]; });
+    dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"2" forState:UIControlStateNormal]; });
 }
 
 static id hook_nextDrawable(id self, SEL sel) {
@@ -241,7 +241,9 @@ static void setupButton(void) {
     gBtn.layer.cornerRadius = 28; gBtn.layer.borderColor = [UIColor whiteColor].CGColor; gBtn.layer.borderWidth = 1;
     gBtn.userInteractionEnabled = YES;
     gBtnLabel = [UIButton buttonWithType:UIButtonTypeSystem]; gBtnLabel.frame = gBtn.bounds;
-    [gBtnLabel setTitle:@"●" forState:UIControlStateNormal]; gBtnLabel.titleLabel.font = [UIFont systemFontOfSize:26]; gBtnLabel.tintColor = [UIColor redColor];
+    [gBtnLabel setTitle:@"2" forState:UIControlStateNormal];   // 版本标记：数字2（绿色=taketwo）
+    gBtnLabel.titleLabel.font = [UIFont systemFontOfSize:24];
+    gBtnLabel.tintColor = [UIColor systemGreenColor];
     gCtrl = [GameRecorderController new];
     [gBtnLabel addTarget:gCtrl action:@selector(btnTapped) forControlEvents:UIControlEventTouchUpInside];
     [gBtn addSubview:gBtnLabel];
@@ -254,18 +256,18 @@ static void setupButton(void) {
 __attribute__((constructor)) static void ctor(void) {
     @autoreleasepool {
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-        if (![bid isEqualToString:@"com.ScarletWork.CounterFlame"]) { NSLog(@"[GRV2] 非目标 %@", bid); return; }
-        NSLog(@"[GRV2] ✅ 注入 %@", bid);
+        if (![bid isEqualToString:@"com.ScarletWork.CounterFlame"]) { NSLog(@"[taketwo] 非目标 %@", bid); return; }
+        NSLog(@"[taketwo] ✅ 已注入 %@ (taketwo)", bid);
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
         CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, gDevice, NULL, &gTexCache);
-        gWriteQ = dispatch_queue_create("GameRecorderV2Write", DISPATCH_QUEUE_SERIAL);
+        gWriteQ = dispatch_queue_create("taketwoWrite", DISPATCH_QUEUE_SERIAL);
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             gGameLayer = findGameLayer();
-            NSLog(@"[GRV2] layer %@", gGameLayer);
+            NSLog(@"[taketwo] layer %@", gGameLayer);
             setupButton();
         });
     }

@@ -4,10 +4,10 @@ INSTALL_TARGET_PROCESSES = SpringBoard
 
 include $(THEOS)/makefiles/common.mk
 
-LIBRARY_NAME = GameRecorderV4
-GameRecorderV4_FILES = src/GameRecorder.xm
-GameRecorderV4_CFLAGS = -fobjc-arc -std=gnu++11 -Wno-deprecated-declarations -Wno-unused-variable -Wno-arc-performSelector-leaks
-GameRecorderV4_FRAMEWORKS = Foundation UIKit AVFoundation Metal MetalKit MetalPerformanceShaders CoreVideo CoreMedia Photos
-GameRecorderV4_LDFLAGS = -Wno-unused-dylib
+LIBRARY_NAME = GameRecorder_takefour
+GameRecorder_takefour_FILES = src/GameRecorder.xm
+GameRecorder_takefour_CFLAGS = -fobjc-arc -std=gnu++11 -Wno-deprecated-declarations -Wno-unused-variable -Wno-arc-performSelector-leaks
+GameRecorder_takefour_FRAMEWORKS = Foundation UIKit AVFoundation Metal MetalKit MetalPerformanceShaders CoreVideo CoreMedia Photos
+GameRecorder_takefour_LDFLAGS = -Wno-unused-dylib
 
 include $(THEOS_MAKE_PATH)/library.mk
