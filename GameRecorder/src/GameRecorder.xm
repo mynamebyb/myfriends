@@ -40,6 +40,7 @@ static id prevGameDrawable;  // 上一帧游戏 drawable（已渲染完成，强
 static UIWindow *gBtnWindow;
 static UIView *gBtn;
 static UIButton *gBtnLabel;
+static GameRecorderController *gCtrl;  // 强引用保住按钮回调 target
 
 #pragma mark - hook 原 IMP
 
@@ -262,11 +263,11 @@ static void setupButton(void) {
     gBtnLabel.titleLabel.font = [UIFont systemFontOfSize:26];
     gBtnLabel.tintColor = [UIColor redColor];
 
-    GameRecorderController *ctrl = [GameRecorderController new];
-    [gBtnLabel addTarget:ctrl action:@selector(btnTapped) forControlEvents:UIControlEventTouchUpInside];
+    gCtrl = [GameRecorderController new];
+    [gBtnLabel addTarget:gCtrl action:@selector(btnTapped) forControlEvents:UIControlEventTouchUpInside];
     [gBtn addSubview:gBtnLabel];
 
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:ctrl action:@selector(btnPanned:)];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gCtrl action:@selector(btnPanned:)];
     [gBtn addGestureRecognizer:pan];
 
     UIViewController *vc = [UIViewController new];
