@@ -1,9 +1,9 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：修复 pixel-buffer 引用计数泄漏 · 720p / ~30fps / 3Mbps · 每 15 秒按真实时间分段
-//  关键修复：去掉 capture 里多余的 CVPixelBufferRetain，让 buffer 正确归还像素池复用
-//           （消除每帧新建 IOSurface 的线性内存泄漏，录完内存可回退）
+//  版本：固定像素池加固版 · 720p / ~30fps / 3Mbps · 每 15 秒按真实时间分段
+//  稳态策略：像素池固定为 3 个 surface 全程复用（绝不扩张）+ 编码跟不上即丢帧
+//          + 修复 pb 引用泄漏（buffer 正确归还池）→ 录制期间内存锁在固定水位
 //
 //  注入：LiveContainer / Sideloadly / nbtool 重签名
 //  目标：com.ScarletWork.CounterFlame
@@ -112,11 +112,13 @@ static BOOL initWriterWithSize(CGSize outSize) {
     };
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
     gInput.expectsMediaDataInRealTime = YES;
+    // 固定像素池：预分配 3 个 surface，全程复用不扩张
     gAdaptor = [AVAssetWriterInputPixelBufferAdaptor assetWriterInputPixelBufferAdaptorWithAssetWriterInput:gInput
         sourcePixelBufferAttributes:@{
             (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
             (id)kCVPixelBufferWidthKey: @((int)gVideoSize.width),
-            (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height)
+            (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height),
+            (id)kCVPixelBufferPoolMinimumBufferCountKey: @(3)
         }];
     [gWriter addInput:gInput];
     if (![gWriter startWriting]) { NSLog(@"[GameRecorder] startWriting 失败"); return NO; }
@@ -125,7 +127,7 @@ static BOOL initWriterWithSize(CGSize outSize) {
     gStartTime = CACurrentMediaTime();
     gSegmentStart = gStartTime;
     gNeedInit = NO;
-    NSLog(@"[GameRecorder] 段 %d 尺寸 %.0fx%.0f 30fps", gSegIndex, gVideoSize.width, gVideoSize.height);
+    NSLog(@"[GameRecorder] 段 %d 尺寸 %.0fx%.0f 30fps（固定池3）", gSegIndex, gVideoSize.width, gVideoSize.height);
     return YES;
 }
 
@@ -206,6 +208,7 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
     if (!gInput || !gInput.isReadyForMoreMediaData || !gAdaptor) return;
     if (!gDevice || !gTexCache) return;
 
+    // 编码跟不上时直接丢帧（inflight≤2，避免编码积压涨内存）
     if (__sync_fetch_and_add(&gInflightBlits, 1) >= 2) {
         __sync_fetch_and_sub(&gInflightBlits, 1);
         return;
@@ -225,7 +228,7 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
     id<MTLTexture> target = mt ? CVMetalTextureGetTexture(mt) : nil;
     if (!target) { if (mt) CFRelease(mt); CVPixelBufferRelease(pb); __sync_fetch_and_sub(&gInflightBlits, 1); return; }
 
-    // 不再额外 Retain pb：完成回调里 release 掉池返回的这个引用即可，buffer 归还池复用
+    // 不额外 Retain pb：完成回调里 release 池返回的这个引用，buffer 归还池复用
     id<MTLCommandBuffer> cb = [gQueue commandBuffer];
     if (gScaler) {
         [gScaler encodeToCommandBuffer:cb sourceTexture:drawable.texture destinationTexture:target];
@@ -266,7 +269,7 @@ static void startRecording(void) {
     gFrameSkip = 0;
     gSegIndex = 0;
     gNeedNewSegment = 0;
-    NSLog(@"[GameRecorder] 开始录制（720p/30fps/3M/15s分段）");
+    NSLog(@"[GameRecorder] 开始录制（720p/30fps/3M/15s分段/固定池3）");
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -410,7 +413,7 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        NSLog(@"[GameRecorder] ✅ 已注入 %@（720p/30fps/3M/15s分段，修复pb泄漏）", bid);
+        NSLog(@"[GameRecorder] ✅ 已注入 %@（720p/30fps/3M/固定池3，稳态版）", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
