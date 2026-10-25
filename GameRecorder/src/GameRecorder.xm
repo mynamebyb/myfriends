@@ -5,6 +5,7 @@
 //   - 只录制游戏主画面（CAMetalLayer 的 drawable），贝总等独立 overlay 不在录制范围
 //   - AVAssetWriter 硬编码 HEVC，录完弹系统分享半屏（可存相册/文件），并默认存相册
 //   - 悬浮按钮触发
+//   - 进程内捕获游戏音频（hook 游戏自身镜像的 AudioUnitSetProperty）
 //
 //  注入：LiveContainer + ElleKit / Sideloadly 重签名。
 //  目标：com.ScarletWork.CounterFlame
@@ -21,6 +22,9 @@
 #import <Photos/Photos.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <mach-o/dyld.h>
+#import <AudioToolbox/AudioToolbox.h>
+#import "fishhook.h"
 
 #pragma mark - 全局状态
 
@@ -48,6 +52,18 @@ static id prevGameDrawable;  // 上一帧游戏 drawable（已渲染完成，强
 static UIWindow *gBtnWindow;
 static UIView *gBtn;
 static UIButton *gBtnLabel;
+
+// ---- 音频捕获状态 ----
+static OSStatus (*orig_AudioUnitSetProperty)(AudioUnit, AudioUnitPropertyID, AudioUnitScope, AudioUnitElement, const void*, UInt32);
+static AURenderCallbackStruct gAudioOrigRender;  // 游戏原音频渲染回调
+static BOOL gAudioHooked = NO;                    // 是否已包装游戏输出单元
+static AVAssetWriterInput *gAudioInput;           // 音频写入轨
+static dispatch_queue_t gAudioQ;                  // 音频串行写队列
+
+// 固定假定：游戏输出 44100Hz 立体声 32-bit float（交错）。绝大多数 iOS 游戏默认。
+static const double kAudioSampleRate = 44100.0;
+static const int kAudioChannels = 2;
+static const int kAudioBytesPerFrame = 4 * kAudioChannels;  // 32bit * 2ch
 
 #pragma mark - hook 原 IMP
 
@@ -124,6 +140,19 @@ static BOOL initWriterFromSize(CGSize texSize) {
             (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height)
         }];
     [gWriter addInput:gInput];
+    // 音频轨：44100Hz 立体声 32-bit float（交错），与捕获数据格式一致
+    gAudioInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeAudio
+        outputSettings:@{
+            AVFormatIDKey: @(kAudioFormatLinearPCM),
+            AVSampleRateKey: @(kAudioSampleRate),
+            AVNumberOfChannelsKey: @(kAudioChannels),
+            AVLinearPCMBitDepthKey: @(32),
+            AVLinearPCMIsFloatKey: @YES,
+            AVLinearPCMIsBigEndianKey: @NO,
+            AVLinearPCMIsNonInterleaved: @NO
+        }];
+    gAudioInput.expectsMediaDataInRealTime = YES;
+    [gWriter addInput:gAudioInput];
     if (![gWriter startWriting]) { NSLog(@"[GameRecorder] startWriting 失败"); return NO; }
     [gWriter startSessionAtSourceTime:kCMTimeZero];
     gFrameCount = 0;
@@ -143,6 +172,92 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     // 定期 flush Metal 纹理缓存，防止长时间录制纹理泄漏导致内存上涨被系统杀掉
     if ((gFrameCount % 60) == 0 && gTexCache) CVMetalTextureCacheFlush(gTexCache, 0);
     [gAdaptor appendPixelBuffer:pb withPresentationTime:pts];
+}
+
+#pragma mark - 音频捕获
+
+static void writeAudioSample(NSData *data, double atSec) {
+    if (!gAudioInput || !gAudioInput.isReadyForMoreMediaData) return;
+    size_t nFrames = data.length / kAudioBytesPerFrame;
+    if (nFrames == 0) return;
+    CMBlockBufferRef block = NULL;
+    OSStatus st = CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault,
+        (void *)data.bytes, data.length, kCFAllocatorNull, NULL, 0, data.length, 0, &block);
+    if (st != kCMBlockBufferNoErr || !block) return;
+    CMSampleBufferRef sb = NULL;
+    CMTime pts = CMTimeMakeWithSeconds(atSec, (int32_t)kAudioSampleRate);
+    size_t sz = nFrames;
+    CMSampleTimingInfo timing = { CMTimeMake(1, (int32_t)kAudioSampleRate), pts, kCMTimeInvalid };
+    st = CMSampleBufferCreate(kCFAllocatorDefault, block, true, NULL, NULL, NULL,
+        (CMItemCount)nFrames, 1, &timing, 1, &sz, &sb);
+    if (st == noErr && sb) {
+        [gAudioInput appendSampleBuffer:sb];
+        CFRelease(sb);
+    }
+    CFRelease(block);
+}
+
+// 包装游戏音频渲染回调：先让游戏渲染，再拷贝 PCM 异步写轨（绝不阻塞音频线程）
+static OSStatus capRenderProc(void *inRefCon, AudioUnitRenderActionFlags *ioActionFlags,
+                              const AudioTimeStamp *inTimeStamp, UInt32 inBusNumber,
+                              UInt32 inNumberFrames, AudioBufferList *ioData) {
+    AURenderCallbackStruct *orig = &gAudioOrigRender;
+    OSStatus st = noErr;
+    if (orig->inputProc) {
+        st = orig->inputProc(orig->inputProcRefCon, ioActionFlags, inTimeStamp, inBusNumber,
+                             inNumberFrames, ioData);
+    }
+    if (gRecording && gAudioInput && ioData && ioData->mNumberBuffers > 0) {
+        AudioBuffer ab = ioData->mBuffers[0];
+        if (ab.mData && ab.mDataByteSize > 0) {
+            NSData *d = [NSData dataWithBytes:ab.mData length:ab.mDataByteSize];
+            double now = CACurrentMediaTime();
+            dispatch_async(gAudioQ, ^{ writeAudioSample(d, now - gStartTime); });
+        }
+    }
+    return st;
+}
+
+// hook AudioUnitSetProperty：拦截输出单元的 render callback，替换为包装回调
+static OSStatus my_AudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID inID,
+                                        AudioUnitScope inScope, AudioUnitElement inElement,
+                                        const void *inData, UInt32 inDataSize) {
+    OSStatus st = orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
+    if (inID == kAudioUnitProperty_SetRenderCallback && !gAudioHooked &&
+        inData && inDataSize == sizeof(AURenderCallbackStruct)) {
+        AURenderCallbackStruct cb;
+        memcpy(&cb, inData, sizeof(cb));
+        if (cb.inputProc) {
+            gAudioOrigRender = cb;
+            AURenderCallbackStruct wrap;
+            wrap.inputProc = &capRenderProc;
+            wrap.inputProcRefCon = NULL;
+            orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, &wrap, inDataSize);
+            gAudioHooked = YES;
+            NSLog(@"[GameRecorder] 已捕获游戏音频输出");
+        }
+    }
+    return st;
+}
+
+// 音频 hook：延迟到启动完成后再做，且只重绑游戏自身镜像（避免 fishhook 全进程重绑在容器崩溃）
+static void hookGameAudio(void) {
+    BOOL rebound = NO;
+    for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+        NSString *n = [NSString stringWithUTF8String:_dyld_get_image_name(i)];
+        if ([n containsString:@"UnityFramework"] || [n containsString:@"ScarletWork"] ||
+            [n containsString:@"CounterFlame"] || [n containsString:@"UnityPlayer"]) {
+            rebind_symbols_image((void *)_dyld_get_image_header(i), _dyld_get_image_vmaddr_slide(i),
+                (struct rebinding[]){{@"AudioUnitSetProperty", (void *)my_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty}}, 1);
+            rebound = YES;
+            NSLog(@"[GameRecorder] 已针对镜像重绑音频符号: %@", n);
+        }
+    }
+    if (!rebound) {
+        // 兜底：找不到游戏镜像才做全进程重绑
+        rebind_symbols((struct rebinding[]){{@"AudioUnitSetProperty", (void *)my_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty}}, 1);
+        NSLog(@"[GameRecorder] 兜底全进程重绑音频符号");
+    }
 }
 
 static void captureDrawable(id<CAMetalDrawable> drawable) {
@@ -245,6 +360,7 @@ static void stopRecording(void) {
         return;
     }
     [gInput markAsFinished];
+    [gAudioInput markAsFinished];
     AVAssetWriter *w = gWriter;
     NSURL *url = gOutURL;
     [w finishWritingWithCompletionHandler:^{
@@ -362,17 +478,20 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         gQueue = [gDevice newCommandQueue];
         CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, gDevice, NULL, &gTexCache);
         gWriteQ = dispatch_queue_create("GameRecorderWrite", DISPATCH_QUEUE_SERIAL);
+        gAudioQ = dispatch_queue_create("GameRecorderAudio", DISPATCH_QUEUE_SERIAL);
 
         // 保存原 IMP 后 swizzle（只 hook nextDrawable，延迟一帧拷贝）
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+        // 延迟到游戏启动完成后，且只重绑游戏自身镜像，避免在 constructor 全进程重绑导致闪退
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             gGameLayer = findGameLayer();
             NSLog(@"[GameRecorder] 游戏 layer %@", gGameLayer);
             setupButton();
+            hookGameAudio();
         });
     }
 }
