@@ -25,22 +25,35 @@ jobs:
           mkdir -p "$THEOS/sdks"
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           echo "Using SDK: $SDK"
-          # 把 Xcode 自带的 iphoneos SDK 链接进 theos/sdks，免下载第三方 SDK
           ln -sfn "$SDK" "$THEOS/sdks/$(basename "$SDK")"
 
-      - name: Build
+      - name: Build HideLabelOnRecord
         run: |
           make clean || true
           make
 
-      - name: Verify artifact
+      - name: Build GameRecorder
+        working-directory: GameRecorder
+        run: |
+          make clean || true
+          make
+
+      - name: Verify GameRecorder
+        working-directory: GameRecorder
         run: |
           find .theos -name "*.dylib" -exec file {} \;
-          nm -gU .theos/obj/debug/arm64/libHideLabelOnRecord.dylib | grep -i "constructor" || true
+          nm -gU .theos/obj/debug/arm64/libGameRecorder.dylib | grep -i constructor || true
 
-      - name: Upload dylib
+      - name: Upload HideLabelOnRecord
         uses: actions/upload-artifact@v4
         with:
           name: HideLabelOnRecord.dylib
           path: .theos/obj/debug/**/*.dylib
+          if-no-files-found: error
+
+      - name: Upload GameRecorder
+        uses: actions/upload-artifact@v4
+        with:
+          name: GameRecorder.dylib
+          path: GameRecorder/.theos/obj/debug/**/*.dylib
           if-no-files-found: error
