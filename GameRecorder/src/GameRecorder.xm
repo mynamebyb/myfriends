@@ -59,6 +59,11 @@ static BOOL gAudioHooked = NO;                    // 是否已包装游戏输出
 static AVAssetWriterInput *gAudioInput;           // 音频写入轨
 static dispatch_queue_t gAudioQ;                  // 音频串行写队列
 
+// 固定假定：游戏输出 44100Hz 立体声 32-bit float（交错）。绝大多数 iOS 游戏默认。
+static const double kAudioSampleRate = 44100.0;
+static const int kAudioChannels = 2;
+static const int kAudioBytesPerFrame = 4 * kAudioChannels;  // 32bit * 2ch
+
 #pragma mark - hook 原 IMP
 
 static id (*orig_nextDrawable)(id, SEL);
@@ -170,11 +175,6 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
 
 #pragma mark - 音频捕获
 
-// 固定假定：游戏输出 44100Hz 立体声 32-bit float（交错）。绝大多数 iOS 游戏默认。
-static const double kAudioSampleRate = 44100.0;
-static const int kAudioChannels = 2;
-static const int kAudioBytesPerFrame = 4 * kAudioChannels;  // 32bit * 2ch
-
 static void writeAudioSample(NSData *data, double atSec) {
     if (!gAudioInput || !gAudioInput.isReadyForMoreMediaData) return;
     size_t nFrames = data.length / kAudioBytesPerFrame;
@@ -185,10 +185,10 @@ static void writeAudioSample(NSData *data, double atSec) {
     if (st != kCMBlockBufferNoErr || !block) return;
     CMSampleBufferRef sb = NULL;
     CMTime pts = CMTimeMakeWithSeconds(atSec, (int32_t)kAudioSampleRate);
-    CMItemCount n = (CMItemCount)nFrames;
+    size_t sz = nFrames;
     CMSampleTimingInfo timing = { CMTimeMake(1, (int32_t)kAudioSampleRate), pts, kCMTimeInvalid };
     st = CMSampleBufferCreate(kCFAllocatorDefault, block, true, NULL, NULL, NULL,
-        nFrames, 1, &timing, 1, &n, &sb);
+        (CMItemCount)nFrames, 1, &timing, 1, &sz, &sb);
     if (st == noErr && sb) {
         [gAudioInput appendSampleBuffer:sb];
         CFRelease(sb);
@@ -202,9 +202,9 @@ static OSStatus capRenderProc(void *inRefCon, AudioUnitRenderActionFlags *ioActi
                               UInt32 inNumberFrames, AudioBufferList *ioData) {
     AURenderCallbackStruct *orig = &gAudioOrigRender;
     OSStatus st = noErr;
-    if (orig->inProc) {
-        st = orig->inProc(orig->inProcRefCon, ioActionFlags, inTimeStamp, inBusNumber,
-                          inNumberFrames, ioData);
+    if (orig->inputProc) {
+        st = orig->inputProc(orig->inputProcRefCon, ioActionFlags, inTimeStamp, inBusNumber,
+                             inNumberFrames, ioData);
     }
     if (gRecording && gAudioInput && ioData && ioData->mNumberBuffers > 0) {
         AudioBuffer ab = ioData->mBuffers[0];
@@ -226,11 +226,11 @@ static OSStatus my_AudioUnitSetProperty(AudioUnit inUnit, AudioUnitPropertyID in
         inData && inDataSize == sizeof(AURenderCallbackStruct)) {
         AURenderCallbackStruct cb;
         memcpy(&cb, inData, sizeof(cb));
-        if (cb.inProc) {
+        if (cb.inputProc) {
             gAudioOrigRender = cb;
             AURenderCallbackStruct wrap;
-            wrap.inProc = &capRenderProc;
-            wrap.inProcRefCon = NULL;
+            wrap.inputProc = &capRenderProc;
+            wrap.inputProcRefCon = NULL;
             orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, &wrap, inDataSize);
             gAudioHooked = YES;
             NSLog(@"[GameRecorder] 已捕获游戏音频输出");
