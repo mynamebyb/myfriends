@@ -37,7 +37,7 @@ static NSURL *gOutURL;
 static NSInteger gFrameCount;
 static CGSize gVideoSize;
 static double gStartTime;  // 录制开始时间（真实时间戳，避免慢动作）
-static int gFrameSkip;     // 限帧计数器（30fps）
+static int gFrameSkip;     // 限帧计数器（15fps）
 
 static CAMetalLayer *gGameLayer;
 static id prevGameDrawable;  // 上一帧游戏 drawable（已渲染完成，强引用保留待拷贝）
@@ -102,8 +102,8 @@ static BOOL initWriterFromSize(CGSize texSize) {
         AVVideoCodecKey: AVVideoCodecTypeH264,
         AVVideoWidthKey: @((int)gVideoSize.width),
         AVVideoHeightKey: @((int)gVideoSize.height),
-        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(6 * 1024 * 1024),
-                                            AVVideoExpectedSourceFrameRateKey: @(30) }
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(4 * 1024 * 1024),
+                                            AVVideoExpectedSourceFrameRateKey: @(15) }
     };
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
     gInput.expectsMediaDataInRealTime = YES;
@@ -143,7 +143,12 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
     if (!gDevice || !gTexCache) return;
 
     CVPixelBufferRef pb = NULL;
-    CVReturn cv = CVPixelBufferPoolCreatePixelBuffer(NULL, gAdaptor.pixelBufferPool, &pb);
+    // 非阻塞取帧：pool 满时跳过该帧，绝不阻塞游戏渲染线程（否则卡顿/占用暴涨/闪退）
+    NSDictionary *aux = @{ (id)kCVPixelBufferPoolAllocationFailurePolicyKey:
+                                   @(kCVPixelBufferPoolAllocationFailurePolicyDiscard) };
+    CVReturn cv = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(NULL,
+                                            gAdaptor.pixelBufferPool,
+                                            (__bridge CFDictionaryRef)aux, &pb);
     if (cv != kCVReturnSuccess || !pb) return;
 
     CVMetalTextureRef mt = NULL;
@@ -232,8 +237,8 @@ static void stopRecording(void) {
 static id hook_nextDrawable(id self, SEL sel) {
     id d = orig_nextDrawable(self, sel);
     if (gRecording && self == gGameLayer) {
-        // 限帧：每 2 帧捕获一次（约 30fps），避免编码堆积闪退
-        if (prevGameDrawable && (++gFrameSkip % 2 == 0)) {
+        // 限帧：每 4 帧捕获一次（约 15fps），避免编码压力过大
+        if (prevGameDrawable && (++gFrameSkip % 4 == 0)) {
             captureDrawable(prevGameDrawable);
         }
         prevGameDrawable = d;  // 强引用保留本帧，供下一帧拷贝
