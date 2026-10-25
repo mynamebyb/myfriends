@@ -1,12 +1,11 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：自签原生版（Sideloadly/nbtool 注入）· 720p / 2Mbps · 每 15 秒按真实时间分段
-//  分段：每满 15 秒切段，延迟 0.8s 等硬件编码器释放后再建新段，避免新旧编码会话重叠。
-//  悬浮按钮：轮询等待游戏主画面 UI 就绪后创建，适配 DYLD 注入时机早 / 多 dylib 顺序冲突。
-//  录完自动存相册，不再弹分享页面。
+//  版本：LC 内存优化版 · 540p / ~30fps / 1Mbps · 每 15 秒按真实时间分段 + 0.8s 释放间隔
+//  目标：把录制过程的内存增速压到最低（之前实测 ~47MB/s，2000MB 触顶闪退）
+//  内置内存日志：每 5 秒打印进程 RSS，便于确认增速是否下降。
 //
-//  注入：Sideloadly/nbtool 重签名原生运行
+//  注入：LiveContainer / Sideloadly / nbtool 重签名
 //  目标：com.ScarletWork.CounterFlame
 //
 
@@ -21,6 +20,17 @@
 #import <Photos/Photos.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <mach/mach.h>
+
+#pragma mark - 进程内存(RSS)
+
+static size_t currentRSS(void) {
+    struct task_basic_info info;
+    mach_msg_type_number_t size = TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&info, &size) == KERN_SUCCESS)
+        return info.resident_size;
+    return 0;
+}
 
 #pragma mark - 全局状态
 
@@ -107,8 +117,8 @@ static BOOL initWriterWithSize(CGSize outSize) {
         AVVideoCodecKey: AVVideoCodecTypeHEVC,
         AVVideoWidthKey: @((int)gVideoSize.width),
         AVVideoHeightKey: @((int)gVideoSize.height),
-        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(2 * 1024 * 1024),
-                                            AVVideoExpectedSourceFrameRateKey: @(60) }
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(1024 * 1024),  // 1Mbps
+                                            AVVideoExpectedSourceFrameRateKey: @(30) }
     };
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
     gInput.expectsMediaDataInRealTime = YES;
@@ -125,15 +135,15 @@ static BOOL initWriterWithSize(CGSize outSize) {
     gStartTime = CACurrentMediaTime();
     gSegmentStart = gStartTime;
     gNeedInit = NO;
-    NSLog(@"[GameRecorder] 段 %d 尺寸 %.0fx%.0f", gSegIndex, gVideoSize.width, gVideoSize.height);
+    NSLog(@"[GameRecorder] 段 %d 尺寸 %.0fx%.0f 30fps", gSegIndex, gVideoSize.width, gVideoSize.height);
     return YES;
 }
 
-// 从源纹理尺寸算出输出尺寸（压到 720 宽）再初始化
+// 从源纹理尺寸算出输出尺寸（压到 540 宽）再初始化
 static BOOL initWriterFromTexSize(CGSize texSize) {
     if (texSize.width <= 0 || texSize.height <= 0) return NO;
     CGSize out = texSize;
-    CGFloat targetW = 720;
+    CGFloat targetW = 540;
     if (out.width > targetW) {
         CGFloat ratio = targetW / out.width;
         out = CGSizeMake(targetW, (NSInteger)(out.height * ratio / 2) * 2);
@@ -191,7 +201,7 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     CMTime pts = CMTimeMakeWithSeconds(now - gStartTime, 600);
     [gAdaptor appendPixelBuffer:pb withPresentationTime:pts];
     gFrameCount++;
-    if ((gFrameCount % 120) == 0 && gTexCache) CVMetalTextureCacheFlush(gTexCache, 0);
+    if ((gFrameCount % 30) == 0 && gTexCache) CVMetalTextureCacheFlush(gTexCache, 0);
     // 按真实时间每满 15 秒切段（不依赖帧数）
     if (!gNeedNewSegment && (now - gSegmentStart) >= gSegmentDuration) {
         cutSegment();
@@ -267,7 +277,7 @@ static void startRecording(void) {
     gFrameSkip = 0;
     gSegIndex = 0;
     gNeedNewSegment = 0;
-    NSLog(@"[GameRecorder] 开始录制（分段 15s·真实时间 · 720p · 2Mbps）");
+    NSLog(@"[GameRecorder] 开始录制（540p/30fps/1M/15s分段 · RSS %.0fMB）", currentRSS()/1024.0/1024.0);
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -290,12 +300,14 @@ static void stopRecording(void) {
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"●" forState:UIControlStateNormal]; });
 }
 
-#pragma mark - Hook：捕获游戏画面（每帧抓）
+#pragma mark - Hook：捕获游戏画面（每 2 帧抓 1，~30fps，降编码负载）
 
 static id hook_nextDrawable(id self, SEL sel) {
     id d = orig_nextDrawable(self, sel);
     if (gRecording && self == gGameLayer) {
-        if (prevGameDrawable) captureDrawable(prevGameDrawable);
+        if (gFrameSkip++ % 2 == 0 && prevGameDrawable) {
+            captureDrawable(prevGameDrawable);
+        }
         prevGameDrawable = d;
     }
     return d;
@@ -371,10 +383,9 @@ static void setupButton(void) {
 #pragma mark - 轮询等 UI 就绪后再建悬浮按钮（适配 DYLD 注入时机早 / 多 dylib 顺序）
 
 static void trySetupUI(void) {
-    if (gBtnWindow) return;                 // 已建成功
+    if (gBtnWindow) return;
     if (!gGameLayer) gGameLayer = findGameLayer();
-    if (!gGameLayer) return;                // 游戏主画面还没出现，继续等
-    // 确认已有可用的应用窗口（UI 栈就绪）
+    if (!gGameLayer) return;
     UIApplication *app = [UIApplication sharedApplication];
     if (!app || (app.keyWindow == nil && app.windows.count == 0)) return;
     setupButton();
@@ -392,7 +403,7 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        NSLog(@"[GameRecorder] ✅ 已注入 %@（自签原生版 720p/2Mbps/15s 时间分段）", bid);
+        NSLog(@"[GameRecorder] ✅ 已注入 %@（LC内存优化版 540p/30fps/1M/15s分段）", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
@@ -403,10 +414,9 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
 
-        // 轮询等待游戏画面 + UI 栈就绪后建悬浮按钮（最多约 30 秒）
+        // 轮询等 UI 就绪后建悬浮按钮
         __block int tries = 0;
-        dispatch_block_t poll = ^{ };
-        poll = ^{
+        dispatch_block_t poll = ^{
             tries++;
             trySetupUI();
             if (!gBtnWindow && tries < 60) {
@@ -418,5 +428,18 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         };
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), poll);
+
+        // 每 5 秒打印一次进程 RSS，观察内存增速
+        __block int rssTicks = 0;
+        dispatch_block_t rssLog = ^{
+            rssTicks++;
+            NSLog(@"[GameRecorder] RSS %.0fMB 段 %d", currentRSS()/1024.0/1024.0, gSegIndex);
+            if (rssTicks < 120) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), rssLog);
+            }
+        };
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), rssLog);
     }
 }
