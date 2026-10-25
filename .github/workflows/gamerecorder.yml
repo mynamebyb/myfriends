@@ -2,9 +2,6 @@ name: GameRecorder Build
 
 on:
   push:
-    paths:
-      - 'GameRecorder/**'
-      - '.github/workflows/gamerecorder.yml'
   workflow_dispatch:
 
 jobs:
