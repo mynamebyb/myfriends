@@ -1,4 +1,4 @@
-name: Build dylib (Theos)
+name: Build GameRecorder
 
 on:
   push:
@@ -27,11 +27,6 @@ jobs:
           echo "Using SDK: $SDK"
           ln -sfn "$SDK" "$THEOS/sdks/$(basename "$SDK")"
 
-      - name: Build HideLabelOnRecord
-        run: |
-          make clean || true
-          make
-
       - name: Build GameRecorder
         working-directory: GameRecorder
         run: |
@@ -43,13 +38,6 @@ jobs:
         run: |
           find .theos -name "*.dylib" -exec file {} \;
           nm -gU .theos/obj/debug/arm64/libGameRecorder.dylib | grep -i constructor || true
-
-      - name: Upload HideLabelOnRecord
-        uses: actions/upload-artifact@v4
-        with:
-          name: HideLabelOnRecord.dylib
-          path: .theos/obj/debug/**/*.dylib
-          if-no-files-found: error
 
       - name: Upload GameRecorder
         uses: actions/upload-artifact@v4
