@@ -35,12 +35,12 @@ jobs:
 
       - name: Verify artifact
         run: |
-          file .theos/obj/debug/libHideLabelOnRecord.dylib
-          nm -gU .theos/obj/debug/libHideLabelOnRecord.dylib | grep -i "constructor" || true
+          find .theos -name "*.dylib" -exec file {} \;
+          nm -gU .theos/obj/debug/arm64/libHideLabelOnRecord.dylib | grep -i "constructor" || true
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: HideLabelOnRecord.dylib
-          path: .theos/obj/debug/libHideLabelOnRecord.dylib
+          path: .theos/obj/debug/**/*.dylib
           if-no-files-found: error
