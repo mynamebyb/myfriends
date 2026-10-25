@@ -11,6 +11,8 @@
 //  隐藏方式：录屏时清空 ImDrawData（CmdListsCount/TotalVtxCount/TotalIdxCount）后仍调用原函数，
 //  而非直接 return —— 避免 Metal 提交异常崩溃，同时使 ImGui 界面不渲染、游戏画面保留。
 //
+//  时机：延迟 3 秒 hook，避开启动期与贝总工具自身的 Dobby inline hook 初始化冲突。
+//
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -60,7 +62,7 @@ static void hook_RenderDrawData(void *drawData, void *cmdBuffer, void *cmdEncode
     orig_RenderDrawData(drawData, cmdBuffer, cmdEncoder);
 }
 
-#pragma mark - 加载入口
+#pragma mark - 加载入口（延迟 hook，避开启动期与贝总工具 Dobby 初始化冲突）
 
 __attribute__((constructor)) static void HideLabelOnRecord_ctor(void)
 {
@@ -71,15 +73,19 @@ __attribute__((constructor)) static void HideLabelOnRecord_ctor(void)
             return;
         }
 
-        // U3D通杀工具 导出的 ImGui Metal 渲染提交函数（mangled 名）
         const char *sym = "_Z30ImGui_ImplMetal_RenderDrawDataP10ImDrawDataPU27objcproto16MTLCommandBuffer11objc_objectPU34objcproto23MTLRenderCommandEncoder11objc_object";
-        void *target = dlsym(RTLD_DEFAULT, sym);
-        if (!target) {
-            NSLog(@"[hideonrecord] 未找到 ImGui_ImplMetal_RenderDrawData 符号");
-            return;
-        }
 
-        MSHookFunction_fn(target, (void *)&hook_RenderDrawData, (void **)&orig_RenderDrawData);
-        NSLog(@"[hideonrecord] ✅ 已 hook ImGui_ImplMetal_RenderDrawData（录屏时隐藏）");
+        // 延迟 3 秒再 hook：启动画面期完全不干预，避免闪退；
+        // 游戏跑起来后 hook，录屏时隐藏贝总界面。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            void *target = dlsym(RTLD_DEFAULT, sym);
+            if (!target) {
+                NSLog(@"[hideonrecord] 延迟 hook 失败：未找到 ImGui_ImplMetal_RenderDrawData 符号");
+                return;
+            }
+            MSHookFunction_fn(target, (void *)&hook_RenderDrawData, (void **)&orig_RenderDrawData);
+            NSLog(@"[hideonrecord] ✅ 已延迟 hook ImGui_ImplMetal_RenderDrawData（录屏时隐藏）");
+        });
     }
 }
