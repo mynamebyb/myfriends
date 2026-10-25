@@ -1,0 +1,33 @@
+name: Build AudioMux IPA
+on:
+  push:
+    paths:
+      - 'AudioMux/**'
+      - '.github/workflows/build-audiomux.yml'
+    branches: [main, master]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install xcodegen
+        run: brew install xcodegen
+      - name: Generate project
+        run: cd AudioMux && xcodegen generate
+      - name: Build unsigned app
+        run: |
+          cd AudioMux
+          xcodebuild -project AudioMux.xcodeproj -scheme AudioMux -configuration Release -sdk iphoneos -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
+      - name: Package IPA
+        run: |
+          APP=$(find AudioMux/build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)
+          echo "APP=$APP"
+          mkdir -p Payload
+          cp -r "$APP" Payload/
+          zip -qry AudioMux.ipa Payload
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioMux-ipa
+          path: AudioMux.ipa

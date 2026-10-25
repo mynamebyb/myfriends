@@ -1,0 +1,22 @@
+name: AudioMux
+options:
+  bundleIdPrefix: com.audiomux
+  deploymentTarget:
+    iOS: "14.0"
+  createIntermediateGroups: true
+targets:
+  AudioMux:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.audiomux.app
+        INFOPLIST_FILE: Info.plist
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGNING_ALLOWED: "NO"
+        GENERATE_INFOPLIST_FILE: "NO"
+        SUPPORTS_MACCATALYST: "NO"
