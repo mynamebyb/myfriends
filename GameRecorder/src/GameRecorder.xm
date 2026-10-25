@@ -1,12 +1,12 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：自签原生版（Sideloadly/nbtool 注入）· 60fps / 720p / 2Mbps · 每 15 秒分段
-//  分段：按【真实时间】切段（每满 15 秒必切），不依赖帧数（游戏实际帧率可能低于 60）。
-//        切段后延迟 0.8s 等硬件编码器完全释放再建新段，避免新旧编码会话重叠。
-//        录完自动存相册，不再弹分享页面。
+//  版本：自签原生版（Sideloadly/nbtool 注入）· 720p / 2Mbps · 每 15 秒按真实时间分段
+//  分段：每满 15 秒切段，延迟 0.8s 等硬件编码器释放后再建新段，避免新旧编码会话重叠。
+//  悬浮按钮：轮询等待游戏主画面 UI 就绪后创建，适配 DYLD 注入时机早 / 多 dylib 顺序冲突。
+//  录完自动存相册，不再弹分享页面。
 //
-//  注入：Sideloadly/nbtool 重签名原生运行（LiveContainer 内存配额不够，已弃用）
+//  注入：Sideloadly/nbtool 重签名原生运行
 //  目标：com.ScarletWork.CounterFlame
 //
 
@@ -39,7 +39,7 @@ static NSURL *gOutURL;
 static NSInteger gFrameCount;
 static CGSize gVideoSize;
 static double gStartTime;
-static double gSegmentStart;   // 当前段的开始时间（用于时间切段）
+static double gSegmentStart;
 static int gFrameSkip;
 static int gInflightBlits;
 
@@ -107,7 +107,7 @@ static BOOL initWriterWithSize(CGSize outSize) {
         AVVideoCodecKey: AVVideoCodecTypeHEVC,
         AVVideoWidthKey: @((int)gVideoSize.width),
         AVVideoHeightKey: @((int)gVideoSize.height),
-        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(2 * 1024 * 1024),  // 2Mbps
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(2 * 1024 * 1024),
                                             AVVideoExpectedSourceFrameRateKey: @(60) }
     };
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
@@ -160,7 +160,7 @@ static void startNewSegment(void) {
     });
 }
 
-// 结束当前段并存相册，延迟 0.8s 等编码器释放后再开新段，避免新旧编码会话重叠
+// 结束当前段并存相册，延迟 0.8s 等编码器释放后再开新段
 static void cutSegment(void) {
     if (!gInput) { gNeedNewSegment = 0; return; }
     gNeedNewSegment = 1;
@@ -176,7 +176,6 @@ static void cutSegment(void) {
         } else {
             NSLog(@"[GameRecorder] 段 %ld 未完成 %ld", (long)(gSegIndex-1), (long)oldW.status);
         }
-        // 延迟 0.8s 再重建，给硬件编码器充分释放时间
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
                        dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
             startNewSegment();
@@ -193,7 +192,7 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     [gAdaptor appendPixelBuffer:pb withPresentationTime:pts];
     gFrameCount++;
     if ((gFrameCount % 120) == 0 && gTexCache) CVMetalTextureCacheFlush(gTexCache, 0);
-    // 分段：按【真实时间】每满 15 秒切段（不依赖帧数，游戏实际帧率可能不足 60）
+    // 按真实时间每满 15 秒切段（不依赖帧数）
     if (!gNeedNewSegment && (now - gSegmentStart) >= gSegmentDuration) {
         cutSegment();
     }
@@ -369,6 +368,21 @@ static void setupButton(void) {
     [gBtnWindow makeKeyAndVisible];
 }
 
+#pragma mark - 轮询等 UI 就绪后再建悬浮按钮（适配 DYLD 注入时机早 / 多 dylib 顺序）
+
+static void trySetupUI(void) {
+    if (gBtnWindow) return;                 // 已建成功
+    if (!gGameLayer) gGameLayer = findGameLayer();
+    if (!gGameLayer) return;                // 游戏主画面还没出现，继续等
+    // 确认已有可用的应用窗口（UI 栈就绪）
+    UIApplication *app = [UIApplication sharedApplication];
+    if (!app || (app.keyWindow == nil && app.windows.count == 0)) return;
+    setupButton();
+    if (gBtnWindow && !gBtnWindow.hidden) {
+        NSLog(@"[GameRecorder] 悬浮按钮已创建，开始捕获");
+    }
+}
+
 #pragma mark - 加载入口
 
 __attribute__((constructor)) static void GameRecorder_ctor(void) {
@@ -378,7 +392,7 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        NSLog(@"[GameRecorder] ✅ 已注入 %@（自签原生版 720p/2Mbps/15s真实时间分段）", bid);
+        NSLog(@"[GameRecorder] ✅ 已注入 %@（自签原生版 720p/2Mbps/15s 时间分段）", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
@@ -389,11 +403,20 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            gGameLayer = findGameLayer();
-            NSLog(@"[GameRecorder] 游戏 layer %@", gGameLayer);
-            setupButton();
-        });
+        // 轮询等待游戏画面 + UI 栈就绪后建悬浮按钮（最多约 30 秒）
+        __block int tries = 0;
+        dispatch_block_t poll = ^{ };
+        poll = ^{
+            tries++;
+            trySetupUI();
+            if (!gBtnWindow && tries < 60) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), poll);
+            } else if (!gBtnWindow) {
+                NSLog(@"[GameRecorder] 30s 内未建按钮（未找到游戏画面）");
+            }
+        };
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), poll);
     }
 }
