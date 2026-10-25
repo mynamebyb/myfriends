@@ -10,7 +10,7 @@
 //  隐藏方式：录屏时清空 ImDrawData（CmdListsCount/TotalVtxCount/TotalIdxCount）后仍调用原函数，
 //  而非直接 return —— 避免 Metal 提交异常崩溃，同时使 ImGui 界面不渲染、游戏画面保留。
 //
-//  录屏状态：主线程每 0.5s 轮询写入全局 gCaptured（RenderDrawData 可能在渲染线程调用，读不到捕获状态）。
+//  录屏状态：主线程 NSTimer 每 0.5s 轮询写入全局 gCaptured（RenderDrawData 可能在渲染线程调用）。
 //
 
 #import <Foundation/Foundation.h>
@@ -49,13 +49,15 @@ static bool IsCapturedNow(void)
 // 在主线程每 0.5s 轮询一次录屏状态，写入全局 gCaptured；hook（可能跑在渲染线程）读它
 static void StartCapturedPoll(void)
 {
-    __block void (^poll)(void);
-    poll = ^{
-        gCaptured = IsCapturedNow();
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), poll);
-    };
-    dispatch_async(dispatch_get_main_queue(), poll);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // NSTimer 定时轮询，避免递归 block 的 retain-cycle 告警
+        NSTimer *timer = [NSTimer scheduledTimerWithTimeInterval:0.5
+                                                          repeats:YES
+                                                            block:^(NSTimer *t) {
+            gCaptured = IsCapturedNow();
+        }];
+        (void)timer; // 已加入主线程 runloop，会被持有
+    });
 }
 
 #pragma mark - Hook：ImGui_ImplMetal_RenderDrawData
