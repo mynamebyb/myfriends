@@ -1,7 +1,8 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：FMOD 音频 tap 版 · fishhook 延迟到启动后再装（避免 constructor 立即重绑导致零秒崩）
+//  版本：inline hook 版 · dlsym 拿 ElleKit 的 MSHookFunction，改 AudioUnitSetProperty 开头指令
+//  不碰 GOT（fishhook 在 LC 下必崩），旁路包 render callback 拷 PCM，游戏内仍正常出声
 //
 
 #import <Foundation/Foundation.h>
@@ -16,7 +17,7 @@
 #import <Photos/Photos.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
-#import "fishhook.h"
+#import <dlfcn.h>
 
 #pragma mark - 全局状态
 
@@ -43,7 +44,6 @@ static AURenderCallback gOrigRenderCallback = NULL;
 static void *gOrigRenderUserData = NULL;
 static AudioStreamBasicDescription gAudioASBD;
 static BOOL gAudioHookInstalled = NO;
-static BOOL gFishhookInstalled = NO;
 
 static CAMetalLayer *gGameLayer;
 static id prevGameDrawable;
@@ -169,15 +169,21 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
     return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
 }
 
-static void installFishhook(void) {
-    if (gFishhookInstalled) return;
-    gFishhookInstalled = YES;
-    struct rebinding rb;
-    rb.name = "AudioUnitSetProperty";
-    rb.replacement = (void *)hook_AudioUnitSetProperty;
-    rb.replaced = (void **)&orig_AudioUnitSetProperty;
-    rebind_symbols(&rb, 1);
-    NSLog(@"[GameRecorder] fishhook AudioUnitSetProperty 已延迟安装");
+#pragma mark - inline hook（ElleKit MSHookFunction，不静态依赖）
+
+typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
+
+static void installAudioInlineHook(void) {
+    MSHookFunction_t msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
+    if (!msHook) msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "_MSHookFunction");
+    if (!msHook) {
+        NSLog(@"[GameRecorder] ✗ 进程内未找到 MSHookFunction（ElleKit 未加载？），音频 hook 跳过");
+        return;
+    }
+    void *target = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
+    if (!target) { NSLog(@"[GameRecorder] ✗ dlsym AudioUnitSetProperty 失败"); return; }
+    msHook(target, (void *)hook_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty);
+    NSLog(@"[GameRecorder] ✓ inline hook AudioUnitSetProperty 已装 (MSHookFunction=%p)", msHook);
 }
 
 #pragma mark - writer
@@ -330,7 +336,7 @@ static void startRecording(void) {
     gRecording = YES;
     gNeedInit = YES;
     gFrameSkip = 0;
-    NSLog(@"[GameRecorder] 开始录制（FMOD tap，音频hook=%d）", gAudioHookInstalled);
+    NSLog(@"[GameRecorder] 开始录制（inline hook，音频hook=%d）", gAudioHookInstalled);
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -442,11 +448,6 @@ static void trySetupUI(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app || (app.keyWindow == nil && app.windows.count == 0)) return;
     setupButton();
-    // 按钮建好后，延迟安装 fishhook（启动稳定后再动全局符号）
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        installFishhook();
-    });
 }
 
 static void GameRecorder_poll(void) {
@@ -470,12 +471,15 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        NSLog(@"[GameRecorder] ✅ 已注入 %@（FMOD tap，fishhook 延迟安装）", bid);
+        NSLog(@"[GameRecorder] ✅ 已注入 %@（inline hook 版）", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
         CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, gDevice, NULL, &gTexCache);
         gWriteQ = dispatch_queue_create("GameRecorderWrite", DISPATCH_QUEUE_SERIAL);
+
+        // 音频 inline hook（改指令，不碰 GOT，可在启动早期安全执行）
+        installAudioInlineHook();
 
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
