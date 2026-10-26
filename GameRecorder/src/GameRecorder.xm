@@ -1,7 +1,7 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：纯画面稳定基座 + 文件日志（音频 hook 暂时关闭，先恢复可打开并能读日志）
+//  版本：inline hook 延迟探测版 · 启动后 3s 再装 MSHookFunction，日志逐步定位崩点
 //
 
 #import <Foundation/Foundation.h>
@@ -19,7 +19,7 @@
 #import <dlfcn.h>
 #import <stdarg.h>
 
-#pragma mark - 文件日志（崩了也能在 文件 App 里回看）
+#pragma mark - 文件日志
 
 static NSString *GRLogPath(void) {
     static NSString *p;
@@ -118,7 +118,7 @@ static CAMetalLayer *findGameLayer(void) {
     return best;
 }
 
-#pragma mark - 音频 tap（当前关闭，保留实现备用）
+#pragma mark - 音频 tap
 
 static void enqueueAudioPCM(const AudioBufferList *abl, UInt32 inNumberFrames) {
     if (!gRecording || !gAudioInput || !gAudioInput.readyForMoreMediaData) return;
@@ -201,22 +201,21 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
     return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
 }
 
-#pragma mark - inline hook（保留实现，当前不启用）
+#pragma mark - inline hook（延迟安装，逐步日志）
 
 typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
 
-__attribute__((unused))
 static void installAudioInlineHook(void) {
-    GRLog(@"准备 dlsym MSHookFunction...");
+    GRLog(@"[1] 准备 dlsym MSHookFunction...");
     MSHookFunction_t msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
     if (!msHook) msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "_MSHookFunction");
-    if (!msHook) { GRLog(@"✗ 未找到 MSHookFunction，音频 hook 跳过"); return; }
-    GRLog(@"MSHookFunction=%p，准备 dlsym AudioUnitSetProperty", msHook);
+    if (!msHook) { GRLog(@"[1x] 未找到 MSHookFunction，音频 hook 跳过"); return; }
+    GRLog(@"[2] MSHookFunction=%p，dlsym AudioUnitSetProperty", msHook);
     void *target = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
-    if (!target) { GRLog(@"✗ dlsym AudioUnitSetProperty 失败"); return; }
-    GRLog(@"AudioUnitSetProperty=%p，执行 inline hook", target);
+    if (!target) { GRLog(@"[2x] dlsym AudioUnitSetProperty 失败"); return; }
+    GRLog(@"[3] AudioUnitSetProperty=%p，执行 inline hook 前", target);
     msHook(target, (void *)hook_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty);
-    GRLog(@"✓ inline hook AudioUnitSetProperty 已装");
+    GRLog(@"[4] ✓ inline hook 完成，orig=%p", orig_AudioUnitSetProperty);
 }
 
 #pragma mark - writer
@@ -369,7 +368,7 @@ static void startRecording(void) {
     gRecording = YES;
     gNeedInit = YES;
     gFrameSkip = 0;
-    GRLog(@"开始录制（纯画面，音频hook=%d）", gAudioHookInstalled);
+    GRLog(@"开始录制（inline hook=%d）", gAudioHookInstalled);
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -465,7 +464,7 @@ static void setupButton(void) {
     [gBtn addSubview:gBtnLabel];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gCtrl action:@selector(btnPanned:)];
-    [gBtn addGestureRecognizer:pan];
+    [gBtn addGestureRecogn:pan];
 
     UIViewController *vc = [UIViewController new];
     vc.view = gBtn;
@@ -481,6 +480,11 @@ static void trySetupUI(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app || (app.keyWindow == nil && app.windows.count == 0)) return;
     setupButton();
+    // 按钮建好后 3 秒再装 inline hook（避开启动早期）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        installAudioInlineHook();
+    });
 }
 
 static void GameRecorder_poll(void) {
@@ -511,9 +515,6 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, gDevice, NULL, &gTexCache);
         gWriteQ = dispatch_queue_create("GameRecorderWrite", DISPATCH_QUEUE_SERIAL);
         GRLog(@"Metal/队列 初始化完成 device=%p", gDevice);
-
-        // 音频 inline hook 当前关闭，先确保能打开
-        // installAudioInlineHook();
 
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
