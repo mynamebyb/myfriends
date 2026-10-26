@@ -1,8 +1,7 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：inline hook 版 · dlsym 拿 ElleKit 的 MSHookFunction，改 AudioUnitSetProperty 开头指令
-//  不碰 GOT（fishhook 在 LC 下必崩），旁路包 render callback 拷 PCM，游戏内仍正常出声
+//  版本：纯画面稳定基座 + 文件日志（音频 hook 暂时关闭，先恢复可打开并能读日志）
 //
 
 #import <Foundation/Foundation.h>
@@ -18,6 +17,39 @@
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
+#import <stdarg.h>
+
+#pragma mark - 文件日志（崩了也能在 文件 App 里回看）
+
+static NSString *GRLogPath(void) {
+    static NSString *p;
+    static dispatch_once_t t;
+    dispatch_once(&t, ^{
+        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        p = [docs stringByAppendingPathComponent:@"gamerecorder.log"];
+        if (![[NSFileManager defaultManager] fileExistsAtPath:p]) {
+            [@"--- GameRecorder log ---\n" writeToFile:p atomically:YES
+                                                encoding:NSUTF8StringEncoding error:nil];
+        }
+    });
+    return p;
+}
+
+static void GRLog(NSString *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    NSString *msg = [[NSString alloc] initWithFormat:fmt arguments:ap];
+    va_end(ap);
+    NSLog(@"[GameRecorder] %@", msg);
+    @try {
+        NSString *line = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], msg];
+        NSFileHandle *fh = [NSFileHandle fileHandleForWritingAtPath:GRLogPath()];
+        if (fh) {
+            [fh seekToEndOfFile];
+            [fh writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+            [fh closeFile];
+        }
+    } @catch (__unused NSException *e) {}
+}
 
 #pragma mark - 全局状态
 
@@ -86,7 +118,7 @@ static CAMetalLayer *findGameLayer(void) {
     return best;
 }
 
-#pragma mark - 音频 tap
+#pragma mark - 音频 tap（当前关闭，保留实现备用）
 
 static void enqueueAudioPCM(const AudioBufferList *abl, UInt32 inNumberFrames) {
     if (!gRecording || !gAudioInput || !gAudioInput.readyForMoreMediaData) return;
@@ -147,8 +179,8 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
     if (inID == kAudioUnitProperty_StreamFormat && inScope == kAudioUnitScope_Input &&
         inDataSize == sizeof(AudioStreamBasicDescription)) {
         memcpy(&gAudioASBD, inData, sizeof(AudioStreamBasicDescription));
-        NSLog(@"[GameRecorder] 记录音频格式 %uHz %uch",
-              (unsigned)gAudioASBD.mSampleRate, (unsigned)gAudioASBD.mChannelsPerFrame);
+        GRLog(@"记录音频格式 %uHz %uch", (unsigned)gAudioASBD.mSampleRate,
+              (unsigned)gAudioASBD.mChannelsPerFrame);
     }
     if (inID == kAudioUnitProperty_SetRenderCallback && inScope == kAudioUnitScope_Input &&
         inDataSize == sizeof(AURenderCallbackStruct) && !gAudioHookInstalled) {
@@ -162,28 +194,28 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
             wrapped.inputProc = tapRenderCallback;
             wrapped.inputProcRefCon = gOrigRenderUserData;
 
-            NSLog(@"[GameRecorder] 已 hook 游戏 render callback: %p", cb->inputProc);
+            GRLog(@"已 hook 游戏 render callback: %p", cb->inputProc);
             return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, &wrapped, sizeof(wrapped));
         }
     }
     return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
 }
 
-#pragma mark - inline hook（ElleKit MSHookFunction，不静态依赖）
+#pragma mark - inline hook（保留实现，当前不启用）
 
 typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
 
 static void installAudioInlineHook(void) {
+    GRLog(@"准备 dlsym MSHookFunction...");
     MSHookFunction_t msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
     if (!msHook) msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "_MSHookFunction");
-    if (!msHook) {
-        NSLog(@"[GameRecorder] ✗ 进程内未找到 MSHookFunction（ElleKit 未加载？），音频 hook 跳过");
-        return;
-    }
+    if (!msHook) { GRLog(@"✗ 未找到 MSHookFunction，音频 hook 跳过"); return; }
+    GRLog(@"MSHookFunction=%p，准备 dlsym AudioUnitSetProperty", msHook);
     void *target = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
-    if (!target) { NSLog(@"[GameRecorder] ✗ dlsym AudioUnitSetProperty 失败"); return; }
+    if (!target) { GRLog(@"✗ dlsym AudioUnitSetProperty 失败"); return; }
+    GRLog(@"AudioUnitSetProperty=%p，执行 inline hook", target);
     msHook(target, (void *)hook_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty);
-    NSLog(@"[GameRecorder] ✓ inline hook AudioUnitSetProperty 已装 (MSHookFunction=%p)", msHook);
+    GRLog(@"✓ inline hook AudioUnitSetProperty 已装");
 }
 
 #pragma mark - writer
@@ -199,7 +231,7 @@ static BOOL initWriterWithSize(CGSize outSize) {
     gOutURL = tmp;
     NSError *err = nil;
     gWriter = [AVAssetWriter assetWriterWithURL:tmp fileType:AVFileTypeMPEG4 error:&err];
-    if (!gWriter) { NSLog(@"[GameRecorder] writer 创建失败 %@", err); return NO; }
+    if (!gWriter) { GRLog(@"writer 创建失败 %@", err); return NO; }
 
     NSDictionary *os = @{
         AVVideoCodecKey: AVVideoCodecTypeHEVC,
@@ -230,15 +262,15 @@ static BOOL initWriterWithSize(CGSize outSize) {
         gAudioInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeAudio outputSettings:ao];
         gAudioInput.expectsMediaDataInRealTime = YES;
         [gWriter addInput:gAudioInput];
-        NSLog(@"[GameRecorder] 音频轨已挂 %uHz %uch", (unsigned)sr, (unsigned)ch);
+        GRLog(@"音频轨已挂 %uHz %uch", (unsigned)sr, (unsigned)ch);
     }
 
-    if (![gWriter startWriting]) { NSLog(@"[GameRecorder] startWriting 失败"); return NO; }
+    if (![gWriter startWriting]) { GRLog(@"startWriting 失败"); return NO; }
     [gWriter startSessionAtSourceTime:kCMTimeZero];
     gFrameCount = 0;
     gStartTime = CACurrentMediaTime();
     gNeedInit = NO;
-    NSLog(@"[GameRecorder] 录制 %.0fx%.0f 60fps%@", gVideoSize.width, gVideoSize.height,
+    GRLog(@"录制 %.0fx%.0f 60fps%@", gVideoSize.width, gVideoSize.height,
           gAudioInput ? @"+AAC" : @"(无音频轨)");
     return YES;
 }
@@ -258,7 +290,7 @@ static void saveToPhotos(NSURL *url) {
     [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
         [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:url];
     } completionHandler:^(BOOL ok, NSError *err) {
-        NSLog(@"[GameRecorder] %@ 存相册 %@", url.lastPathComponent,
+        GRLog(@"%@ 存相册 %@", url.lastPathComponent,
               ok ? @"成功" : [NSString stringWithFormat:@"失败 %@", err]);
     }];
 }
@@ -336,7 +368,7 @@ static void startRecording(void) {
     gRecording = YES;
     gNeedInit = YES;
     gFrameSkip = 0;
-    NSLog(@"[GameRecorder] 开始录制（inline hook，音频hook=%d）", gAudioHookInstalled);
+    GRLog(@"开始录制（纯画面，音频hook=%d）", gAudioHookInstalled);
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -344,7 +376,7 @@ static void stopRecording(void) {
     if (!gRecording) return;
     gRecording = NO;
     prevGameDrawable = nil;
-    if (!gInput) { NSLog(@"[GameRecorder] 未开始写入即停止"); return; }
+    if (!gInput) { GRLog(@"未开始写入即停止"); return; }
     [gInput markAsFinished];
     if (gAudioInput) [gAudioInput markAsFinished];
     AVAssetWriter *w = gWriter;
@@ -352,10 +384,10 @@ static void stopRecording(void) {
     gWriter = nil; gInput = nil; gAdaptor = nil; gAudioInput = nil;
     [w finishWritingWithCompletionHandler:^{
         if (w.status != AVAssetWriterStatusCompleted) {
-            NSLog(@"[GameRecorder] 录制未完成 %ld", (long)w.status);
+            GRLog(@"录制未完成 %ld", (long)w.status);
             return;
         }
-        NSLog(@"[GameRecorder] 录制完成 %@", url.path);
+        GRLog(@"录制完成 %@", url.path);
         saveToPhotos(url);
     }];
     if (gTexCache) { CFRelease(gTexCache); gTexCache = NULL; }
@@ -471,23 +503,26 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        NSLog(@"[GameRecorder] ✅ 已注入 %@（inline hook 版）", bid);
+        GRLog(@"✅ constructor 开始，bid=%@", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
         CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, gDevice, NULL, &gTexCache);
         gWriteQ = dispatch_queue_create("GameRecorderWrite", DISPATCH_QUEUE_SERIAL);
+        GRLog(@"Metal/队列 初始化完成 device=%p", gDevice);
 
-        // 音频 inline hook（改指令，不碰 GOT，可在启动早期安全执行）
-        installAudioInlineHook();
+        // 音频 inline hook 当前关闭，先确保能打开
+        // installAudioInlineHook();
 
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
+        GRLog(@"nextDrawable hook 完成");
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             GameRecorder_poll();
         });
+        GRLog(@"constructor 正常结束");
     }
 }
