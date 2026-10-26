@@ -1,7 +1,7 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：FMOD 音频 tap 版 · hook AudioUnitSetProperty 的 SetRenderCallback，旁路拷 PCM
+//  版本：FMOD 音频 tap 版 · fishhook 延迟到启动后再装（避免 constructor 立即重绑导致零秒崩）
 //
 
 #import <Foundation/Foundation.h>
@@ -43,6 +43,7 @@ static AURenderCallback gOrigRenderCallback = NULL;
 static void *gOrigRenderUserData = NULL;
 static AudioStreamBasicDescription gAudioASBD;
 static BOOL gAudioHookInstalled = NO;
+static BOOL gFishhookInstalled = NO;
 
 static CAMetalLayer *gGameLayer;
 static id prevGameDrawable;
@@ -143,6 +144,12 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
                                           AudioUnitElement inElement,
                                           const void *inData,
                                           UInt32 inDataSize) {
+    if (inID == kAudioUnitProperty_StreamFormat && inScope == kAudioUnitScope_Input &&
+        inDataSize == sizeof(AudioStreamBasicDescription)) {
+        memcpy(&gAudioASBD, inData, sizeof(AudioStreamBasicDescription));
+        NSLog(@"[GameRecorder] 记录音频格式 %uHz %uch",
+              (unsigned)gAudioASBD.mSampleRate, (unsigned)gAudioASBD.mChannelsPerFrame);
+    }
     if (inID == kAudioUnitProperty_SetRenderCallback && inScope == kAudioUnitScope_Input &&
         inDataSize == sizeof(AURenderCallbackStruct) && !gAudioHookInstalled) {
         const AURenderCallbackStruct *cb = (const AURenderCallbackStruct *)inData;
@@ -160,6 +167,17 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
         }
     }
     return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
+}
+
+static void installFishhook(void) {
+    if (gFishhookInstalled) return;
+    gFishhookInstalled = YES;
+    struct rebinding rb;
+    rb.name = "AudioUnitSetProperty";
+    rb.replacement = (void *)hook_AudioUnitSetProperty;
+    rb.replaced = (void **)&orig_AudioUnitSetProperty;
+    rebind_symbols(&rb, 1);
+    NSLog(@"[GameRecorder] fishhook AudioUnitSetProperty 已延迟安装");
 }
 
 #pragma mark - writer
@@ -312,7 +330,7 @@ static void startRecording(void) {
     gRecording = YES;
     gNeedInit = YES;
     gFrameSkip = 0;
-    NSLog(@"[GameRecorder] 开始录制（FMOD tap 版，音频hook=%d）", gAudioHookInstalled);
+    NSLog(@"[GameRecorder] 开始录制（FMOD tap，音频hook=%d）", gAudioHookInstalled);
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -424,6 +442,11 @@ static void trySetupUI(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app || (app.keyWindow == nil && app.windows.count == 0)) return;
     setupButton();
+    // 按钮建好后，延迟安装 fishhook（启动稳定后再动全局符号）
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        installFishhook();
+    });
 }
 
 static void GameRecorder_poll(void) {
@@ -447,7 +470,7 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        NSLog(@"[GameRecorder] ✅ 已注入 %@（FMOD render-callback tap 版）", bid);
+        NSLog(@"[GameRecorder] ✅ 已注入 %@（FMOD tap，fishhook 延迟安装）", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
@@ -457,13 +480,6 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
-
-        struct rebinding rb;
-        rb.name = "AudioUnitSetProperty";
-        rb.replacement = (void *)hook_AudioUnitSetProperty;
-        rb.replaced = (void **)&orig_AudioUnitSetProperty;
-        rebind_symbols(&rb, 1);
-        NSLog(@"[GameRecorder] fishhook AudioUnitSetProperty 已装");
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
