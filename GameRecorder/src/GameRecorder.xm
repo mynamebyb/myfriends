@@ -2,13 +2,6 @@
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
 //  版本：FMOD 音频 tap 版 · hook AudioUnitSetProperty 的 SetRenderCallback，旁路拷 PCM
-//  游戏音频栈 = FMOD → CoreAudio HAL output unit。
-//  做法：fishhook AudioUnitSetProperty，拦截 kAudioUnitProperty_SetRenderCallback，
-//        把游戏注册的 render callback 包一层 wrapper——先调原 callback 填 buffer，
-//        再旁路拷一份 PCM 给 writer 音频轨（不截流，游戏照常出声）。
-//
-//  注入：LiveContainer / Sideloadly / nbtool 重签名
-//  目标：com.ScarletWork.CounterFlame
 //
 
 #import <Foundation/Foundation.h>
@@ -46,7 +39,6 @@ static double gStartTime;
 static int gFrameSkip;
 static int gInflightBlits;
 
-// FMOD render callback tap 状态
 static AURenderCallback gOrigRenderCallback = NULL;
 static void *gOrigRenderUserData = NULL;
 static AudioStreamBasicDescription gAudioASBD;
@@ -93,9 +85,9 @@ static CAMetalLayer *findGameLayer(void) {
     return best;
 }
 
-#pragma mark - 音频 tap：把 PCM buffer 旁路拷给 writer
+#pragma mark - 音频 tap
 
-static void enqueueAudioPCM(const AudioBufferList *abl, UInt32 inNumberFrames, AudioTimeStamp *ts) {
+static void enqueueAudioPCM(const AudioBufferList *abl, UInt32 inNumberFrames) {
     if (!gRecording || !gAudioInput || !gAudioInput.readyForMoreMediaData) return;
     if (!abl || abl->mNumberBuffers == 0) return;
 
@@ -131,22 +123,20 @@ static void enqueueAudioPCM(const AudioBufferList *abl, UInt32 inNumberFrames, A
     CFRelease(fmt);
 }
 
-// 包一层的 render callback：先调原 callback 填 buffer，再旁路拷一份
 static OSStatus tapRenderCallback(void *inRefCon,
                                    AudioUnitRenderActionFlags *ioActionFlags,
                                    const AudioTimeStamp *inTimeStamp,
                                    UInt32 inBusNumber,
                                    UInt32 inNumberFrames,
                                    AudioBufferList *ioData) {
-    OSStatus st = gOrigRenderCallback(inRefCon, ioActionFlags, inTimeStamp,
+    OSStatus st = gOrigRenderCallback(gOrigRenderUserData, ioActionFlags, inTimeStamp,
                                       inBusNumber, inNumberFrames, ioData);
     if (st == noErr && gRecording) {
-        enqueueAudioPCM(ioData, inNumberFrames, (AudioTimeStamp *)inTimeStamp);
+        enqueueAudioPCM(ioData, inNumberFrames);
     }
     return st;
 }
 
-// hook AudioUnitSetProperty：拦截游戏注册 render callback
 static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
                                           AudioUnitPropertyID inID,
                                           AudioUnitScope inScope,
@@ -163,8 +153,7 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
 
             AURenderCallbackStruct wrapped;
             wrapped.inputProc = tapRenderCallback;
-            wrapped.inputProcRefCon = inRefCon ? NULL : NULL;
-            wrapped.inputProcRefCon = (void *)inRefCon;
+            wrapped.inputProcRefCon = gOrigRenderUserData;
 
             NSLog(@"[GameRecorder] 已 hook 游戏 render callback: %p", cb->inputProc);
             return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, &wrapped, sizeof(wrapped));
@@ -205,7 +194,6 @@ static BOOL initWriterWithSize(CGSize outSize) {
         }];
     [gWriter addInput:gInput];
 
-    // 音频轨（AAC）
     if (gAudioHookInstalled) {
         UInt32 sr = gAudioASBD.mSampleRate > 0 ? gAudioASBD.mSampleRate : 44100;
         UInt32 ch = gAudioASBD.mChannelsPerFrame > 0 ? gAudioASBD.mChannelsPerFrame : 2;
@@ -470,7 +458,6 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
 
-        // fishhook AudioUnitSetProperty：拦截游戏注册 render callback
         struct rebinding rb;
         rb.name = "AudioUnitSetProperty";
         rb.replacement = (void *)hook_AudioUnitSetProperty;
