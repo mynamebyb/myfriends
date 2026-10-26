@@ -1,5 +1,6 @@
 // Copyright (c) 2013, Facebook, Inc.
 // MIT License
+//  复制自 fishhook.c，改为 .mm 以便按 ObjC++ 编译（适配 -std=gnu++11）
 #include "fishhook.h"
 
 #include <dlfcn.h>
@@ -57,9 +58,9 @@ static void perform_rebinding_with_slide(struct rebindings_entry *rebindings,
       char *symbol_name = strtab + strtab_offset;
       if ((symtab[symtab_index].n_type & N_STAB) &&
           strcmp(symbol_name + 1, cur->rebindings[i].name) == 0) {
-        cur->rebindings[i].replaced = (void **)&indirect_symbol_bindings[i];
+        cur->rebindings[i].replaced = &indirect_symbol_bindings[i];
         *cur->rebindings[i].replaced =
-            (void *)((uintptr_t)cur->rebindings[i].replacement + slide);
+            (void *)cur->rebindings[i].replacement + slide;
       }
     }
   }
@@ -91,7 +92,7 @@ static void rebind_symbols_for_image(const struct mach_header *header,
   }
 
   for (uint32_t i = 0; i < segment_count; i++) {
-    if (cur_seg_cmd->cmd == LC_SEGMENT_64 &&
+    if (cur_seg_cmd->cmd == LC_SEGMENT_ARCH_DEPENDENT &&
         strcmp(cur_seg_cmd->segname, SEG_LINKEDIT) == 0) {
       linkedit_segment = cur_seg_cmd;
     } else if (cur_seg_cmd->cmd == LC_SYMTAB) {
