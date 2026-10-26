@@ -1,8 +1,9 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：无分段版 · 1080p(4:3 原画优先) / 60fps / 5Mbps · 单文件一路录到底
-//  说明：去掉 120s 分段逻辑，录制为单个视频文件；其余稳态逻辑保持不变
+//  版本：音频捕获试做版 · 1080p/60fps/5M 画面 + AVAudioEngine outputNode tap 截 PCM 写音频轨
+//  原理：起一个 AVAudioEngine，在 outputNode 上 installTap（旁路监听，不截流，扬声器照常出声），
+//        把 PCM 转 CMSampleBuffer 喂给 writer 的 AAC 音频轨。不动全局 dyld 符号（区别于 fishhook）。
 //
 //  注入：LiveContainer / Sideloadly / nbtool 重签名
 //  目标：com.ScarletWork.CounterFlame
@@ -16,6 +17,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <CoreMedia/CoreMedia.h>
 #import <AVFoundation/AVFoundation.h>
+#import <AudioToolbox/AudioToolbox.h>
 #import <Photos/Photos.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
@@ -33,6 +35,8 @@ static BOOL gNeedInit = NO;
 static AVAssetWriter *gWriter;
 static AVAssetWriterInput *gInput;
 static AVAssetWriterInputPixelBufferAdaptor *gAdaptor;
+static AVAssetWriterInput *gAudioInput;
+static AVAudioEngine *gAudioEngine;
 static NSURL *gOutURL;
 static NSInteger gFrameCount;
 static CGSize gVideoSize;
@@ -82,6 +86,47 @@ static CAMetalLayer *findGameLayer(void) {
     return best;
 }
 
+#pragma mark - 音频 tap 回调：把 PCM 转 CMSampleBuffer 喂给 writer 音频轨
+
+static void appendAudioBuffer(AVAudioPCMBuffer *buf, AVAudioTime *when) {
+    if (!gAudioInput || !gAudioInput.readyForMoreMediaData) return;
+    if (!buf || buf.frameLength == 0) return;
+
+    double now = CACurrentMediaTime();
+    CMTime pts = CMTimeMakeWithSeconds(now - gStartTime, 100000);
+
+    AudioStreamBasicDescription asbd = *buf.format.streamDescription;
+    CMFormatDescriptionRef fmt = NULL;
+    CMAudioFormatDescriptionCreate(kCFAllocatorDefault, &asbd, 0, NULL, 0, NULL, NULL, &fmt);
+    if (!fmt) return;
+
+    CMSampleTimingInfo timing;
+    timing.presentationTimeStamp = pts;
+    timing.duration = CMTimeMake(buf.frameLength, buf.format.sampleRate);
+    timing.decodeTimeStamp = kCMTimeInvalid;
+
+    CMSampleBufferRef sb = NULL;
+    OSStatus s = CMSampleBufferCreate(kCFAllocatorDefault, NULL, YES, NULL, NULL, fmt,
+                                      buf.frameLength, 1, &timing, 0, NULL, &sb);
+    if (s == noErr && sb) {
+        AudioBufferList *abl = buf.mutableAudioBufferList;
+        CMBlockBufferRef blk = NULL;
+        CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault,
+                                           abl->mBuffers[0].mData,
+                                           abl->mBuffers[0].mDataByteSize,
+                                           kCFAllocatorNull, NULL, 0,
+                                           abl->mBuffers[0].mDataByteSize,
+                                           0, &blk);
+        if (blk) {
+            CMSampleBufferSetDataBuffer(sb, blk);
+            [gAudioInput appendSampleBuffer:sb];
+            CFRelease(blk);
+        }
+        CFRelease(sb);
+    }
+    CFRelease(fmt);
+}
+
 #pragma mark - 用输出尺寸初始化 writer
 
 static BOOL initWriterWithSize(CGSize outSize) {
@@ -96,11 +141,12 @@ static BOOL initWriterWithSize(CGSize outSize) {
     NSError *err = nil;
     gWriter = [AVAssetWriter assetWriterWithURL:tmp fileType:AVFileTypeMPEG4 error:&err];
     if (!gWriter) { NSLog(@"[GameRecorder] writer 创建失败 %@", err); return NO; }
+    // 视频轨
     NSDictionary *os = @{
         AVVideoCodecKey: AVVideoCodecTypeHEVC,
         AVVideoWidthKey: @((int)gVideoSize.width),
         AVVideoHeightKey: @((int)gVideoSize.height),
-        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(5 * 1024 * 1024),  // 5Mbps
+        AVVideoCompressionPropertiesKey: @{ AVVideoAverageBitRateKey: @(5 * 1024 * 1024),
                                             AVVideoExpectedSourceFrameRateKey: @(60) }
     };
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
@@ -112,16 +158,26 @@ static BOOL initWriterWithSize(CGSize outSize) {
             (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height)
         }];
     [gWriter addInput:gInput];
+    // 音频轨（AAC）
+    NSDictionary *ao = @{
+        AVFormatIDKey: @(kAudioFormatMPEG4AAC),
+        AVSampleRateKey: @(44100),
+        AVNumberOfChannelsKey: @(2),
+        AVEncoderBitRateKey: @(128000)
+    };
+    gAudioInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeAudio outputSettings:ao];
+    gAudioInput.expectsMediaDataInRealTime = YES;
+    [gWriter addInput:gAudioInput];
+
     if (![gWriter startWriting]) { NSLog(@"[GameRecorder] startWriting 失败"); return NO; }
     [gWriter startSessionAtSourceTime:kCMTimeZero];
     gFrameCount = 0;
     gStartTime = CACurrentMediaTime();
     gNeedInit = NO;
-    NSLog(@"[GameRecorder] 录制尺寸 %.0fx%.0f 60fps 单文件", gVideoSize.width, gVideoSize.height);
+    NSLog(@"[GameRecorder] 录制 %.0fx%.0f 60fps+AAC 单文件", gVideoSize.width, gVideoSize.height);
     return YES;
 }
 
-// 从源纹理尺寸算出输出尺寸（1080p 优先，原画尽量保留）再初始化
 static BOOL initWriterFromTexSize(CGSize texSize) {
     if (texSize.width <= 0 || texSize.height <= 0) return NO;
     CGSize out = texSize;
@@ -130,11 +186,10 @@ static BOOL initWriterFromTexSize(CGSize texSize) {
         CGFloat ratio = targetH / out.height;
         out = CGSizeMake((NSInteger)(out.width * ratio / 2) * 2, targetH);
     }
-    // 源高度 ≤1080 时保持原尺寸（原画）
     return initWriterWithSize(out);
 }
 
-#pragma mark - 存相册（不再弹分享页）
+#pragma mark - 存相册
 
 static void saveToPhotos(NSURL *url) {
     [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
@@ -145,7 +200,7 @@ static void saveToPhotos(NSURL *url) {
     }];
 }
 
-#pragma mark - 编码
+#pragma mark - 视频编码
 
 static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     if (!gInput || !gInput.isReadyForMoreMediaData) return;
@@ -182,7 +237,6 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
     id<MTLTexture> target = mt ? CVMetalTextureGetTexture(mt) : nil;
     if (!target) { if (mt) CFRelease(mt); CVPixelBufferRelease(pb); __sync_fetch_and_sub(&gInflightBlits, 1); return; }
 
-    // 不额外 Retain pb：完成回调里 release 池返回的这个引用，buffer 归还池复用
     id<MTLCommandBuffer> cb = [gQueue commandBuffer];
     if (gScaler) {
         [gScaler encodeToCommandBuffer:cb sourceTexture:drawable.texture destinationTexture:target];
@@ -206,6 +260,38 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
     if (mt) CFRelease(mt);
 }
 
+#pragma mark - 音频引擎
+
+static void startAudioTap(void) {
+    NSError *e = nil;
+    AVAudioSession *sess = [AVAudioSession sharedInstance];
+    [sess setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:&e];
+    if (e) NSLog(@"[GameRecorder] audio session category err %@", e);
+    [sess setActive:YES error:&e];
+    if (e) NSLog(@"[GameRecorder] audio session active err %@", e);
+
+    gAudioEngine = [[AVAudioEngine alloc] init];
+    AVAudioOutputNode *out = gAudioEngine.outputNode;
+    AVAudioFormat *fmt = [out outputFormatForBus:0];
+    [out removeTapOnBus:0];
+    [out installTapOnBus:0 bufferSize:1024 format:fmt block:^(AVAudioPCMBuffer *buf, AVAudioTime *when) {
+        appendAudioBuffer(buf, when);
+    }];
+    [gAudioEngine startAndReturnError:&e];
+    if (e) NSLog(@"[GameRecorder] audio engine start err %@", e);
+    else NSLog(@"[GameRecorder] 音频 tap 已挂 outputNode");
+}
+
+static void stopAudioTap(void) {
+    @try {
+        [gAudioEngine.outputNode removeTapOnBus:0];
+        [gAudioEngine stop];
+    } @catch (NSException *e) {
+        NSLog(@"[GameRecorder] stopAudioTap %@", e);
+    }
+    gAudioEngine = nil;
+}
+
 #pragma mark - 开始 / 停止
 
 static void startRecording(void) {
@@ -221,7 +307,8 @@ static void startRecording(void) {
     gRecording = YES;
     gNeedInit = YES;
     gFrameSkip = 0;
-    NSLog(@"[GameRecorder] 开始录制（1080p/60fps/5M/单文件）");
+    startAudioTap();
+    NSLog(@"[GameRecorder] 开始录制（1080p/60fps/5M+AAC）");
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -229,11 +316,13 @@ static void stopRecording(void) {
     if (!gRecording) return;
     gRecording = NO;
     prevGameDrawable = nil;
+    stopAudioTap();
     if (!gInput) { NSLog(@"[GameRecorder] 未开始写入即停止"); return; }
     [gInput markAsFinished];
+    if (gAudioInput) [gAudioInput markAsFinished];
     AVAssetWriter *w = gWriter;
     NSURL *url = gOutURL;
-    gWriter = nil; gInput = nil; gAdaptor = nil;
+    gWriter = nil; gInput = nil; gAdaptor = nil; gAudioInput = nil;
     [w finishWritingWithCompletionHandler:^{
         if (w.status != AVAssetWriterStatusCompleted) {
             NSLog(@"[GameRecorder] 录制未完成 %ld", (long)w.status);
@@ -242,13 +331,12 @@ static void stopRecording(void) {
         NSLog(@"[GameRecorder] 录制完成 %@", url.path);
         saveToPhotos(url);
     }];
-    // 彻底清理录制资源，确保停止后内存回退
     if (gTexCache) { CFRelease(gTexCache); gTexCache = NULL; }
     gScaler = nil;
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"●" forState:UIControlStateNormal]; });
 }
 
-#pragma mark - Hook：捕获游戏画面（每帧抓 1，追求 60fps；编码跟不上由 isReady 门控自动丢帧）
+#pragma mark - Hook
 
 static id hook_nextDrawable(id self, SEL sel) {
     id d = orig_nextDrawable(self, sel);
@@ -328,7 +416,7 @@ static void setupButton(void) {
     [gBtnWindow makeKeyAndVisible];
 }
 
-#pragma mark - 轮询等 UI 就绪后再建悬浮按钮（静态函数，避免 block 递归 retain cycle）
+#pragma mark - 轮询建按钮
 
 static void trySetupUI(void) {
     if (gBtnWindow) return;
@@ -338,7 +426,7 @@ static void trySetupUI(void) {
     if (!app || (app.keyWindow == nil && app.windows.count == 0)) return;
     setupButton();
     if (gBtnWindow && !gBtnWindow.hidden) {
-        NSLog(@"[GameRecorder] 悬浮按钮已创建，开始捕获");
+        NSLog(@"[GameRecorder] 悬浮按钮已创建");
     }
 }
 
@@ -352,7 +440,7 @@ static void GameRecorder_poll(void) {
             GameRecorder_poll();
         });
     } else if (!gBtnWindow) {
-        NSLog(@"[GameRecorder] 30s 内未建按钮（未找到游戏画面）");
+        NSLog(@"[GameRecorder] 30s 内未建按钮");
     }
 }
 
@@ -365,7 +453,7 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        NSLog(@"[GameRecorder] ✅ 已注入 %@（1080p/60fps/5M/单文件）", bid);
+        NSLog(@"[GameRecorder] ✅ 已注入 %@（1080p/60fps/5M+AAC tap 版）", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
