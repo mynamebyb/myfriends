@@ -1,8 +1,8 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：基于稳定版 07ddf43（已修复 pb 引用泄漏）· 1080p(4:3 原画优先) / 60fps / 5Mbps · 每 120 秒按真实时间分段
-//  说明：本版仅在 07ddf43 基础上改参数（段长/帧率/分辨率/码率），其余稳态逻辑保持不变
+//  版本：无分段版 · 1080p(4:3 原画优先) / 60fps / 5Mbps · 单文件一路录到底
+//  说明：去掉 120s 分段逻辑，录制为单个视频文件；其余稳态逻辑保持不变
 //
 //  注入：LiveContainer / Sideloadly / nbtool 重签名
 //  目标：com.ScarletWork.CounterFlame
@@ -37,14 +37,8 @@ static NSURL *gOutURL;
 static NSInteger gFrameCount;
 static CGSize gVideoSize;
 static double gStartTime;
-static double gSegmentStart;
 static int gFrameSkip;
 static int gInflightBlits;
-
-// 分段录制状态：每 120 秒一段（按真实时间）
-static int gSegIndex = 0;
-static int gNeedNewSegment = 0;
-static const double gSegmentDuration = 120.0;
 
 static CAMetalLayer *gGameLayer;
 static id prevGameDrawable;
@@ -88,7 +82,7 @@ static CAMetalLayer *findGameLayer(void) {
     return best;
 }
 
-#pragma mark - 用输出尺寸初始化 writer（文件名带段号）
+#pragma mark - 用输出尺寸初始化 writer
 
 static BOOL initWriterWithSize(CGSize outSize) {
     if (outSize.width <= 0 || outSize.height <= 0) return NO;
@@ -97,7 +91,7 @@ static BOOL initWriterWithSize(CGSize outSize) {
     if (!gScaler) gScaler = [[MPSImageLanczosScale alloc] initWithDevice:gDevice];
 
     NSURL *tmp = [NSURL fileURLWithPath:[NSTemporaryDirectory() stringByAppendingPathComponent:
-        [NSString stringWithFormat:@"rec_%03d_%ld.mp4", gSegIndex, (long)[NSDate date].timeIntervalSince1970]]];
+        [NSString stringWithFormat:@"rec_%ld.mp4", (long)[NSDate date].timeIntervalSince1970]]];
     gOutURL = tmp;
     NSError *err = nil;
     gWriter = [AVAssetWriter assetWriterWithURL:tmp fileType:AVFileTypeMPEG4 error:&err];
@@ -122,9 +116,8 @@ static BOOL initWriterWithSize(CGSize outSize) {
     [gWriter startSessionAtSourceTime:kCMTimeZero];
     gFrameCount = 0;
     gStartTime = CACurrentMediaTime();
-    gSegmentStart = gStartTime;
     gNeedInit = NO;
-    NSLog(@"[GameRecorder] 段 %d 尺寸 %.0fx%.0f 60fps", gSegIndex, gVideoSize.width, gVideoSize.height);
+    NSLog(@"[GameRecorder] 录制尺寸 %.0fx%.0f 60fps 单文件", gVideoSize.width, gVideoSize.height);
     return YES;
 }
 
@@ -147,39 +140,8 @@ static void saveToPhotos(NSURL *url) {
     [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
         [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:url];
     } completionHandler:^(BOOL ok, NSError *err) {
-        NSLog(@"[GameRecorder] 段 %@ 存相册 %@", url.lastPathComponent,
+        NSLog(@"[GameRecorder] %@ 存相册 %@", url.lastPathComponent,
               ok ? @"成功" : [NSString stringWithFormat:@"失败 %@", err]);
-    }];
-}
-
-// 在 gWriteQ 上重建新段 writer
-static void startNewSegment(void) {
-    dispatch_async(gWriteQ, ^{
-        initWriterWithSize(gVideoSize);
-        gNeedNewSegment = 0;
-    });
-}
-
-// 结束当前段并存相册，延迟 0.8s 等编码器释放后再开新段
-static void cutSegment(void) {
-    if (!gInput) { gNeedNewSegment = 0; return; }
-    gNeedNewSegment = 1;
-    [gInput markAsFinished];
-    AVAssetWriter *oldW = gWriter;
-    NSURL *oldURL = gOutURL;
-    gWriter = nil; gInput = nil; gAdaptor = nil;
-    gSegIndex++;
-    [oldW finishWritingWithCompletionHandler:^{
-        if (oldW.status == AVAssetWriterStatusCompleted) {
-            NSLog(@"[GameRecorder] 段 %ld 完成 %@", (long)(gSegIndex-1), oldURL.path);
-            saveToPhotos(oldURL);
-        } else {
-            NSLog(@"[GameRecorder] 段 %ld 未完成 %ld", (long)(gSegIndex-1), (long)oldW.status);
-        }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)),
-                       dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            startNewSegment();
-        });
     }];
 }
 
@@ -191,15 +153,10 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     CMTime pts = CMTimeMakeWithSeconds(now - gStartTime, 600);
     [gAdaptor appendPixelBuffer:pb withPresentationTime:pts];
     gFrameCount++;
-    // 按真实时间每满 120 秒切段（不依赖帧数）
-    if (!gNeedNewSegment && (now - gSegmentStart) >= gSegmentDuration) {
-        cutSegment();
-    }
 }
 
 static void captureDrawable(id<CAMetalDrawable> drawable) {
     if (!drawable.texture) return;
-    if (gNeedNewSegment) return;
     if (gNeedInit) {
         if (!initWriterFromTexSize(CGSizeMake(drawable.texture.width, drawable.texture.height))) return;
     }
@@ -264,9 +221,7 @@ static void startRecording(void) {
     gRecording = YES;
     gNeedInit = YES;
     gFrameSkip = 0;
-    gSegIndex = 0;
-    gNeedNewSegment = 0;
-    NSLog(@"[GameRecorder] 开始录制（1080p/60fps/5M/120s分段）");
+    NSLog(@"[GameRecorder] 开始录制（1080p/60fps/5M/单文件）");
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -281,10 +236,10 @@ static void stopRecording(void) {
     gWriter = nil; gInput = nil; gAdaptor = nil;
     [w finishWritingWithCompletionHandler:^{
         if (w.status != AVAssetWriterStatusCompleted) {
-            NSLog(@"[GameRecorder] 最后段未完成 %ld", (long)w.status);
+            NSLog(@"[GameRecorder] 录制未完成 %ld", (long)w.status);
             return;
         }
-        NSLog(@"[GameRecorder] 最后段完成 %@", url.path);
+        NSLog(@"[GameRecorder] 录制完成 %@", url.path);
         saveToPhotos(url);
     }];
     // 彻底清理录制资源，确保停止后内存回退
@@ -410,7 +365,7 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        NSLog(@"[GameRecorder] ✅ 已注入 %@（1080p/60fps/5M/120s分段）", bid);
+        NSLog(@"[GameRecorder] ✅ 已注入 %@（1080p/60fps/5M/单文件）", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
