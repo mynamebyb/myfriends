@@ -205,6 +205,7 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
 
 typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
 
+__attribute__((unused))
 static void installAudioInlineHook(void) {
     GRLog(@"准备 dlsym MSHookFunction...");
     MSHookFunction_t msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
