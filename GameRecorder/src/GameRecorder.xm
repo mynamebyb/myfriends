@@ -1,7 +1,7 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：inline hook 延迟探测版 · 启动后 3s 再装 MSHookFunction，日志逐步定位崩点
+//  版本：inline hook 诊断版 · 查 MSHookFunction 真实来源 / ElleKit 加载情况 / ObjC 接口
 //
 
 #import <Foundation/Foundation.h>
@@ -16,8 +16,11 @@
 #import <Photos/Photos.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <objc/message.h>
 #import <dlfcn.h>
 #import <stdarg.h>
+#import <string.h>
+#import <mach-o/dyld.h>
 
 #pragma mark - 文件日志
 
@@ -201,21 +204,50 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
     return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
 }
 
-#pragma mark - inline hook（延迟安装，逐步日志）
+#pragma mark - inline hook 诊断
 
 typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
 
-static void installAudioInlineHook(void) {
-    GRLog(@"[1] 准备 dlsym MSHookFunction...");
+static void diagnoseAndHook(void) {
+    // 1) 枚举含 elle/substrate 的已加载镜像
+    GRLog(@"== 镜像枚举 ==");
+    uint32_t ic = _dyld_image_count();
+    int found = 0;
+    for (uint32_t i = 0; i < ic; i++) {
+        const char *nm = _dyld_get_image_name(i);
+        if (strstr(nm, "elle") || strstr(nm, "Elle") ||
+            strstr(nm, "substrate") || strstr(nm, "Substrate")) {
+            GRLog(@"image: %s", nm); found++;
+        }
+    }
+    if (!found) GRLog(@"未发现 ElleKit/Substrate 镜像");
+
+    // 2) 探测 ObjC 类
+    Class ek = objc_getClass("ElleKit");
+    Class ek2 = objc_getClass("ELHook");
+    GRLog(@"ObjC 类 ElleKit=%p ELHook=%p", ek, ek2);
+
+    // 3) MSHookFunction 来源
     MSHookFunction_t msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
-    if (!msHook) msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "_MSHookFunction");
-    if (!msHook) { GRLog(@"[1x] 未找到 MSHookFunction，音频 hook 跳过"); return; }
-    GRLog(@"[2] MSHookFunction=%p，dlsym AudioUnitSetProperty", msHook);
+    if (!msHook) { GRLog(@"MSHookFunction = NULL，放弃"); return; }
+    Dl_info info;
+    if (dladdr((void *)msHook, &info)) {
+        GRLog(@"MSHookFunction=%p 来自 %s base=%p", msHook,
+              info.dli_fname ? info.dli_fname : "?", info.dli_fbase);
+    }
+
+    // 4) 目标函数
     void *target = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
-    if (!target) { GRLog(@"[2x] dlsym AudioUnitSetProperty 失败"); return; }
-    GRLog(@"[3] AudioUnitSetProperty=%p，执行 inline hook 前", target);
+    if (!target) { GRLog(@"AudioUnitSetProperty = NULL"); return; }
+    GRLog(@"AudioUnitSetProperty=%p，hook 前指令: %02x %02x %02x %02x", target,
+          ((unsigned char *)target)[0], ((unsigned char *)target)[1],
+          ((unsigned char *)target)[2], ((unsigned char *)target)[3]);
+
+    orig_AudioUnitSetProperty = NULL;
     msHook(target, (void *)hook_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty);
-    GRLog(@"[4] ✓ inline hook 完成，orig=%p", orig_AudioUnitSetProperty);
+    GRLog(@"hook 后 orig=%p，指令: %02x %02x %02x %02x", orig_AudioUnitSetProperty,
+          ((unsigned char *)target)[0], ((unsigned char *)target)[1],
+          ((unsigned char *)target)[2], ((unsigned char *)target)[3]);
 }
 
 #pragma mark - writer
@@ -480,10 +512,9 @@ static void trySetupUI(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app || (app.keyWindow == nil && app.windows.count == 0)) return;
     setupButton();
-    // 按钮建好后 3 秒再装 inline hook（避开启动早期）
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        installAudioInlineHook();
+        diagnoseAndHook();
     });
 }
 
