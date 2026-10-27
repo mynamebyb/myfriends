@@ -76,7 +76,7 @@ size_t _lth_fstrlen(FILE *f)
 	uint32_t prev = ftell(f);
 	while (true) {
 		char c = 0;
-		if (fread(&c, sizeof(c), 1) != 1) break;
+		if (fread(&c, sizeof(c), 1, f) != 1) break;
 		if (c == 0) break;
 		sz++;
 	}
@@ -470,7 +470,7 @@ void _litehook_rebind_symbol_in_section(const mach_header_u *targetHeader, secti
 			}
 #endif
 			litehook_unprotect((vm_address_t)&symbolPointers[i], sizeof(void *));
-			if (auth) { 
+			if (auth) {
 				symbolPointers[i] = ptrauth_auth_and_resign(replacement, ptrauth_key_function_pointer, 0, ptrauth_key_process_independent_code, &symbolPointers[i]);
 			}
 			else {
@@ -555,14 +555,14 @@ void litehook_rebind_symbol(const mach_header_u *targetHeader, void *replacee, v
 					!strncmp(segCmd->segname, "__DATA", sizeof(segCmd->segname))) {
 					section_u *sections = (void *)((uintptr_t)lcp + sizeof(segment_command_u));
 					for (int j = 0; j < segCmd->nsects; j++) {
-						if ((sections[j].flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS || 
+						if ((sections[j].flags & SECTION_TYPE) == S_LAZY_SYMBOL_POINTERS ||
 							(sections[j].flags & SECTION_TYPE) == S_NON_LAZY_SYMBOL_POINTERS) {
 							_litehook_rebind_symbol_in_section(targetHeader, &sections[j], replacee, replacement);
 						}
 					}
 				}
 			}
-			lcp = (void *)((uintptr_t)lcp + lcp->cmdsize);
+			lcp = (void *)lcp + lcp->cmdsize;
 		}
 	}
 }
