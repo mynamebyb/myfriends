@@ -172,12 +172,14 @@ static OSStatus tapRenderCallback(void *inRefCon,
                                    UInt32 inBusNumber,
                                    UInt32 inNumberFrames,
                                    AudioBufferList *ioData) {
-    OSStatus st = gOrigRenderCallback(gOrigRenderUserData, ioActionFlags, inTimeStamp,
-                                      inBusNumber, inNumberFrames, ioData);
-    if (st == noErr && gRecording) {
-        enqueueAudioPCM(ioData, inNumberFrames);
+    @autoreleasepool {
+        OSStatus st = gOrigRenderCallback(gOrigRenderUserData, ioActionFlags, inTimeStamp,
+                                          inBusNumber, inNumberFrames, ioData);
+        if (st == noErr && gRecording) {
+            enqueueAudioPCM(ioData, inNumberFrames);
+        }
+        return st;
     }
-    return st;
 }
 
 static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
@@ -319,53 +321,57 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
 }
 
 static void captureDrawable(id<CAMetalDrawable> drawable) {
-    if (!drawable.texture) return;
-    if (gNeedInit) {
-        if (!initWriterFromTexSize(CGSizeMake(drawable.texture.width, drawable.texture.height))) return;
-    }
-    if (!gInput || !gInput.isReadyForMoreMediaData || !gAdaptor) return;
-    if (!gDevice || !gTexCache) return;
+    @autoreleasepool {
+        if (!drawable.texture) return;
+        if (gNeedInit) {
+            if (!initWriterFromTexSize(CGSizeMake(drawable.texture.width, drawable.texture.height))) return;
+        }
+        if (!gInput || !gInput.isReadyForMoreMediaData || !gAdaptor) return;
+        if (!gDevice || !gTexCache) return;
 
-    if (__sync_fetch_and_add(&gInflightBlits, 1) >= 2) {
-        __sync_fetch_and_sub(&gInflightBlits, 1);
-        return;
-    }
-
-    CVPixelBufferRef pb = NULL;
-    NSDictionary *aux = @{ (id)CFSTR("CVPixelBufferPoolAllocationFailurePolicy"): @(2) };
-    CVReturn cv = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(NULL, gAdaptor.pixelBufferPool,
-                                            (__bridge CFDictionaryRef)aux, &pb);
-    if (cv != kCVReturnSuccess || !pb) { __sync_fetch_and_sub(&gInflightBlits, 1); return; }
-
-    CVMetalTextureRef mt = NULL;
-    size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb);
-    MTLPixelFormat targetFmt = (drawable.texture.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB)
-                               ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
-    CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, gTexCache, pb, NULL, targetFmt, w, h, 0, &mt);
-    id<MTLTexture> target = mt ? CVMetalTextureGetTexture(mt) : nil;
-    if (!target) { if (mt) CFRelease(mt); CVPixelBufferRelease(pb); __sync_fetch_and_sub(&gInflightBlits, 1); return; }
-
-    id<MTLCommandBuffer> cb = [gQueue commandBuffer];
-    if (gScaler) {
-        [gScaler encodeToCommandBuffer:cb sourceTexture:drawable.texture destinationTexture:target];
-    } else {
-        id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
-        [blit copyFromTexture:drawable.texture
-                  sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
-                  sourceSize:MTLSizeMake(drawable.texture.width, drawable.texture.height, 1)
-                  toTexture:target destinationSlice:0 destinationLevel:0
-                  destinationOrigin:MTLOriginMake(0,0,0)];
-        [blit endEncoding];
-    }
-    [cb addCompletedHandler:^(id<MTLCommandBuffer> b){
-        dispatch_async(gWriteQ, ^{
-            writerWritePixelBuffer(pb);
+        if (__sync_fetch_and_add(&gInflightBlits, 1) >= 2) {
             __sync_fetch_and_sub(&gInflightBlits, 1);
-            CVPixelBufferRelease(pb);
-        });
-    }];
- [cb commit];
-    if (mt) CFRelease(mt);
+            return;
+        }
+
+        CVPixelBufferRef pb = NULL;
+        NSDictionary *aux = @{ (id)CFSTR("CVPixelBufferPoolAllocationFailurePolicy"): @(2) };
+        CVReturn cv = CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(NULL, gAdaptor.pixelBufferPool,
+                                                (__bridge CFDictionaryRef)aux, &pb);
+        if (cv != kCVReturnSuccess || !pb) { __sync_fetch_and_sub(&gInflightBlits, 1); return; }
+
+        CVMetalTextureRef mt = NULL;
+        size_t w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb);
+        MTLPixelFormat targetFmt = (drawable.texture.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB)
+                                   ? MTLPixelFormatBGRA8Unorm_sRGB : MTLPixelFormatBGRA8Unorm;
+        CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, gTexCache, pb, NULL, targetFmt, w, h, 0, &mt);
+        id<MTLTexture> target = mt ? CVMetalTextureGetTexture(mt) : nil;
+        if (!target) { if (mt) CFRelease(mt); CVPixelBufferRelease(pb); __sync_fetch_and_sub(&gInflightBlits, 1); return; }
+
+        id<MTLCommandBuffer> cb = [gQueue commandBuffer];
+        if (gScaler) {
+            [gScaler encodeToCommandBuffer:cb sourceTexture:drawable.texture destinationTexture:target];
+        } else {
+            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+            [blit copyFromTexture:drawable.texture
+                      sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0,0,0)
+                      sourceSize:MTLSizeMake(drawable.texture.width, drawable.texture.height, 1)
+                      toTexture:target destinationSlice:0 destinationLevel:0
+                      destinationOrigin:MTLOriginMake(0,0,0)];
+            [blit endEncoding];
+        }
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> b){
+            dispatch_async(gWriteQ, ^{
+                @autoreleasepool {
+                    writerWritePixelBuffer(pb);
+                    __sync_fetch_and_sub(&gInflightBlits, 1);
+                    CVPixelBufferRelease(pb);
+                }
+            });
+        }];
+        [cb commit];
+        if (mt) CFRelease(mt);
+    }
 }
 
 #pragma mark - 开始 / 停止
@@ -433,23 +439,18 @@ static id hook_nextDrawable(id self, SEL sel) {
     if (gRecording) stopRecording(); else startRecording();
 }
 - (void)btnPanned:(UIPanGestureRecognizer *)gr {
-    UIView *b = gr.view;
+    UIWindow *win = gBtnWindow;
+    if (!win) return;
     const CGFloat half = 28;
-    if (gr.state == UIGestureRecognizerStateBegan || gr.state == UIGestureRecognizerStateChanged) {
-        CGPoint t = [gr translationInView:b.superview];
-        b.center = CGPointMake(b.center.x + t.x, b.center.y + t.y);
-        [gr setTranslation:CGPointZero inView:b.superview];
-        CGRect sv = b.superview.bounds;
-        CGPoint c = b.center;
-        if (sv.size.width > 0) c.x = MAX(half, MIN(sv.size.width - half, c.x));
-        if (sv.size.height > 0) c.y = MAX(half, MIN(sv.size.height - half, c.y));
-        b.center = c;
-    } else if (gr.state == UIGestureRecognizerStateEnded) {
-        CGRect f = gBtnWindow.frame;
-        f.origin.x = b.center.x - half;
-        f.origin.y = b.center.y - half;
-        gBtnWindow.frame = f;
-    }
+    CGPoint t = [gr translationInView:win];
+    CGPoint c = win.center;
+    c.x += t.x;
+    c.y += t.y;
+    CGRect sb = win.screen.bounds;
+    if (sb.size.width > 0)  c.x = MAX(half, MIN(sb.size.width  - half, c.x));
+    if (sb.size.height > 0) c.y = MAX(half, MIN(sb.size.height - half, c.y));
+    win.center = c;
+    [gr setTranslation:CGPointZero inView:win];
 }
 @end
 
@@ -512,6 +513,18 @@ static void GameRecorder_poll(void) {
 
 #pragma mark - 加载入口
 
+static void cleanupOldTmpFiles(void) {
+    @autoreleasepool {
+        NSString *tmpDir = NSTemporaryDirectory();
+        NSFileManager *fm = [NSFileManager defaultManager];
+        for (NSString *f in [fm contentsOfDirectoryAtPath:tmpDir error:nil]) {
+            if ([f hasPrefix:@"rec_"] && [f.pathExtension isEqualToString:@"mp4"]) {
+                [fm removeItemAtPath:[tmpDir stringByAppendingPathComponent:f] error:nil];
+            }
+        }
+    }
+}
+
 __attribute__((constructor)) static void GameRecorder_ctor(void) {
     @autoreleasepool {
         NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
@@ -520,6 +533,8 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             return;
         }
         GRLog(@"✅ constructor，架构=arm64e bid=%@", bid);
+
+        cleanupOldTmpFiles();
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
