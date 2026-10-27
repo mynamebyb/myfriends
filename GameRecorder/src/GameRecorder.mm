@@ -107,7 +107,7 @@ static UIViewController *topViewController(void) {
 static CAMetalLayer *findGameLayer(void) {
     CAMetalLayer *best = nil;
     CGFloat bestArea = 0;
-    for (UIWindow *w : [UIApplication sharedApplication].windows) {
+    for (UIWindow *w in [UIApplication sharedApplication].windows) {
         if (w.hidden) continue;
         UIView *rv = w.rootViewController.view;
         if (!rv) continue;
@@ -120,7 +120,7 @@ static CAMetalLayer *findGameLayer(void) {
                 CGFloat a = b.size.width * b.size.height;
                 if (a > bestArea) { bestArea = a; best = (CAMetalLayer *)cur.layer; }
             }
-            for (UIView *sv : cur.subviews) [stack addObject:sv];
+            for (UIView *sv in cur.subviews) [stack addObject:sv];
         }
     }
     return best;
