@@ -1,7 +1,7 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：inline hook 深度诊断 · 确认 dylib 架构 + 完整跳转桩 + hook 函数指向
+//  版本：arm64e · constructor 立即 inline hook（解决启动早期错过 SetRenderCallback）
 //
 
 #import <Foundation/Foundation.h>
@@ -179,12 +179,13 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
                                           AudioUnitElement inElement,
                                           const void *inData,
                                           UInt32 inDataSize) {
-    GRLog(@"★ hook被调用 id=%d scope=%d", (int)inID, (int)inScope);
+    GRLog(@"★ hook被调用 id=%d scope=%d size=%u", (int)inID, (int)inScope, (unsigned)inDataSize);
     if (inID == kAudioUnitProperty_StreamFormat && inScope == kAudioUnitScope_Input &&
         inDataSize == sizeof(AudioStreamBasicDescription)) {
         memcpy(&gAudioASBD, inData, sizeof(AudioStreamBasicDescription));
-        GRLog(@"记录音频格式 %uHz %uch", (unsigned)gAudioASBD.mSampleRate,
-              (unsigned)gAudioASBD.mChannelsPerFrame);
+        GRLog(@"记录音频格式 %uHz %uch fmt=%u flags=%u",
+              (unsigned)gAudioASBD.mSampleRate, (unsigned)gAudioASBD.mChannelsPerFrame,
+              (unsigned)gAudioASBD.mFormatID, (unsigned)gAudioASBD.mFormatFlags);
     }
     if (inID == kAudioUnitProperty_SetRenderCallback && inScope == kAudioUnitScope_Input &&
         inDataSize == sizeof(AURenderCallbackStruct) && !gAudioHookInstalled) {
@@ -199,56 +200,31 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
             wrapped.inputProcRefCon = gOrigRenderUserData;
 
             GRLog(@"已 hook 游戏 render callback: %p", cb->inputProc);
-            return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, &wrapped, sizeof(wrapped));
+            if (orig_AudioUnitSetProperty) {
+                return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, &wrapped, sizeof(wrapped));
+            }
+            GRLog(@"orig 为 NULL，无法注册 wrapped");
         }
     }
-    return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
+    if (orig_AudioUnitSetProperty) {
+        return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
+    }
+    return noErr;
 }
 
-#pragma mark - inline hook 深度诊断
+#pragma mark - inline hook
 
 typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
 
-static void dump32(unsigned char *p, NSString *tag) {
-    GRLog(@"%@ [0-7]  %02x %02x %02x %02x %02x %02x %02x %02x", tag,
-          p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]);
-    GRLog(@"%@ [8-15] %02x %02x %02x %02x %02x %02x %02x %02x", tag,
-          p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15]);
-    GRLog(@"%@ [16-23] %02x %02x %02x %02x %02x %02x %02x %02x", tag,
-          p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23]);
-    GRLog(@"%@ [24-31] %02x %02x %02x %02x %02x %02x %02x %02x", tag,
-          p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
-}
-
-static void diagnoseAndHook(void) {
-    GRLog(@"== 镜像枚举 ==");
-    uint32_t ic = _dyld_image_count();
-    int found = 0;
-    for (uint32_t i = 0; i < ic; i++) {
-        const char *nm = _dyld_get_image_name(i);
-        if (strstr(nm, "substrate") || strstr(nm, "Substrate")) {
-            GRLog(@"image: %s", nm); found++;
-        }
-    }
-    if (!found) GRLog(@"未发现 Substrate 镜像");
-
+static void installAudioHook(void) {
     MSHookFunction_t msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
-    if (!msHook) { GRLog(@"MSHookFunction = NULL，放弃"); return; }
-    Dl_info info;
-    if (dladdr((void *)msHook, &info)) {
-        GRLog(@"MSHookFunction=%p 来自 %s", msHook,
-              info.dli_fname ? info.dli_fname : "?");
-    }
-
+    if (!msHook) { GRLog(@"✗ 未找到 MSHookFunction"); return; }
     void *target = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
-    if (!target) { GRLog(@"AudioUnitSetProperty = NULL"); return; }
-    GRLog(@"我们的 hook 函数地址=%p", (void *)hook_AudioUnitSetProperty);
-    dump32((unsigned char *)target, @"hook前");
-
+    if (!target) { GRLog(@"✗ dlsym AudioUnitSetProperty 失败"); return; }
+    GRLog(@"hook前 target=%p hookFunc=%p", target, (void *)hook_AudioUnitSetProperty);
     orig_AudioUnitSetProperty = NULL;
     msHook(target, (void *)hook_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty);
-    GRLog(@"hook返回 orig=%p", orig_AudioUnitSetProperty);
-    dump32((unsigned char *)target, @"hook后");
+    GRLog(@"hook后 orig=%p", orig_AudioUnitSetProperty);
 }
 
 #pragma mark - writer
@@ -401,7 +377,7 @@ static void startRecording(void) {
     gRecording = YES;
     gNeedInit = YES;
     gFrameSkip = 0;
-    GRLog(@"开始录制（inline hook=%d）", gAudioHookInstalled);
+    GRLog(@"开始录制（hook=%d）", gAudioHookInstalled);
     dispatch_async(dispatch_get_main_queue(), ^{ [gBtnLabel setTitle:@"■" forState:UIControlStateNormal]; });
 }
 
@@ -513,10 +489,6 @@ static void trySetupUI(void) {
     UIApplication *app = [UIApplication sharedApplication];
     if (!app || (app.keyWindow == nil && app.windows.count == 0)) return;
     setupButton();
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        diagnoseAndHook();
-    });
 }
 
 static void GameRecorder_poll(void) {
@@ -540,18 +512,15 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-#if defined(__arm64e__)
-        GRLog(@"✅ constructor，dylib 编译架构 = arm64e");
-#elif defined(__arm64__)
-        GRLog(@"✅ constructor，dylib 编译架构 = arm64");
-#else
-        GRLog(@"✅ constructor，dylib 编译架构 = 其他");
-#endif
+        GRLog(@"✅ constructor，架构=arm64e bid=%@", bid);
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
         CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, gDevice, NULL, &gTexCache);
         gWriteQ = dispatch_queue_create("GameRecorderWrite", DISPATCH_QUEUE_SERIAL);
+
+        // 立即 hook，赶在 FMOD 启动注册 callback 之前
+        installAudioHook();
 
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
