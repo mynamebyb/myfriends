@@ -17,20 +17,6 @@ typedef struct nlist nlist_u;
 #define LC_SEGMENT_U LC_SEGMENT
 #endif
 
-const char *litehook_locate_dsc(void);
-
-void *litehook_find_symbol(const mach_header_u *header, const char *symbolName);
-void *litehook_find_symbol_file(const mach_header_u *header, const char *symbolName);
-void *litehook_find_dsc_symbol(const char *imagePath, const char *symbolName);
-kern_return_t litehook_hook_function(void *source, void *target);
-
-#define LITEHOOK_REBIND_GLOBAL NULL
-void litehook_rebind_symbol(const mach_header_u *targetHeader, void *replacee, void *replacement, bool (*exceptionFilter)(const mach_header_u *header));
-
-bool os_tpro_is_supported(void);
-void os_thread_self_restrict_tpro_to_rw(void);
-void os_thread_self_restrict_tpro_to_ro(void);
-
 typedef struct {
     const mach_header_u *sourceHeader;
     void *replacee;
@@ -38,5 +24,28 @@ typedef struct {
     bool (*exceptionFilter)(const mach_header_u *header);
 } global_rebind;
 
+#define LITEHOOK_REBIND_GLOBAL NULL
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+const char *litehook_locate_dsc(void);
+
+void *litehook_find_symbol(const mach_header_u *header, const char *symbolName);
+void *litehook_find_symbol_file(const mach_header_u *header, const char *symbolName);
+void *litehook_find_dsc_symbol(const char *imagePath, const char *symbolName);
+kern_return_t litehook_hook_function(void *source, void *target);
+
+void litehook_rebind_symbol(const mach_header_u *targetHeader, void *replacee, void *replacement, bool (*exceptionFilter)(const mach_header_u *header));
+
+bool os_tpro_is_supported(void);
+void os_thread_self_restrict_tpro_to_rw(void);
+void os_thread_self_restrict_tpro_to_ro(void);
+
 extern uint32_t gRebindCount;
 extern global_rebind *gRebinds;
+
+#ifdef __cplusplus
+}
+#endif
