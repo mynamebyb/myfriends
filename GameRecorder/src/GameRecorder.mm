@@ -255,7 +255,7 @@ static BOOL initWriterWithSize(CGSize outSize) {
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
     gInput.expectsMediaDataInRealTime = YES;
     gAdaptor = [AVAssetWriterInputPixelBufferAdaptor assetWriterInputPixelBufferAdaptorWithAssetWriterInput:gInput
-        sourcePixelBufferAttributes:{
+        sourcePixelBufferAttributes:@{
             (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
             (id)kCVPixelBufferWidthKey: @((int)gVideoSize.width),
             (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height)
@@ -303,7 +303,7 @@ static void saveToPhotos(NSURL *url) {
         [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:url];
     } completionHandler:^(BOOL ok, NSError *err) {
         GRLog(@"%@ 存相册 %@", url.lastPathComponent,
-              ok ? "成功" : [NSString stringWithFormat:@"失败 %@", err]);
+              ok ? @"成功" : [NSString stringWithFormat:@"失败 %@", err]);
     }];
 }
 
@@ -311,7 +311,7 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     if (!gInput || !gInput.isReadyForMoreMediaData) return;
     double now = CACurrentMediaTime();
     CMTime pts = CMTimeMakeWithSeconds(now - gStartTime, 600);
-    [gAdaptor appendPixelBuffer:pb withPresentationTime:pts];
+    [gAdaptor appendPixelBuffer:pb withPresentationTimepts];
     gFrameCount++;
 }
 
