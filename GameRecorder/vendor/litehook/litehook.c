@@ -421,7 +421,7 @@ void *litehook_find_dsc_symbol(const char *imagePath, const char *symbolName)
 		fseek(symbolDSC, symbolHeader.localSymbolsOffset + symbolInfo.stringsOffset + n.n_un.n_strx, SEEK_SET);
 		size_t len = _lth_fstrlen(symbolDSC);
 		char curSymbolName[len+1];
-		if (fread(curSymbolName, len+1), 1, symbolDSC) != 1) goto end;
+		if (fread(curSymbolName, len+1, 1, symbolDSC) != 1) goto end;
 		if (!strcmp(curSymbolName, symbolName)) {
 			symbol = _litehook_sign_if_executable((void *)(litehook_get_dsc_slide() + n.n_value));
 		}
