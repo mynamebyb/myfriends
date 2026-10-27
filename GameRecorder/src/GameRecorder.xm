@@ -1,7 +1,7 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：inline hook 诊断版 · 查 MSHookFunction 真实来源 / ElleKit 加载情况 / ObjC 接口
+//  版本：inline hook 深度诊断 · 确认 dylib 架构 + 完整跳转桩 + hook 函数指向
 //
 
 #import <Foundation/Foundation.h>
@@ -179,6 +179,7 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
                                           AudioUnitElement inElement,
                                           const void *inData,
                                           UInt32 inDataSize) {
+    GRLog(@"★ hook被调用 id=%d scope=%d", (int)inID, (int)inScope);
     if (inID == kAudioUnitProperty_StreamFormat && inScope == kAudioUnitScope_Input &&
         inDataSize == sizeof(AudioStreamBasicDescription)) {
         memcpy(&gAudioASBD, inData, sizeof(AudioStreamBasicDescription));
@@ -204,50 +205,50 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
     return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
 }
 
-#pragma mark - inline hook 诊断
+#pragma mark - inline hook 深度诊断
 
 typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
 
+static void dump32(unsigned char *p, NSString *tag) {
+    GRLog(@"%@ [0-7]  %02x %02x %02x %02x %02x %02x %02x %02x", tag,
+          p[0],p[1],p[2],p[3],p[4],p[5],p[6],p[7]);
+    GRLog(@"%@ [8-15] %02x %02x %02x %02x %02x %02x %02x %02x", tag,
+          p[8],p[9],p[10],p[11],p[12],p[13],p[14],p[15]);
+    GRLog(@"%@ [16-23] %02x %02x %02x %02x %02x %02x %02x %02x", tag,
+          p[16],p[17],p[18],p[19],p[20],p[21],p[22],p[23]);
+    GRLog(@"%@ [24-31] %02x %02x %02x %02x %02x %02x %02x %02x", tag,
+          p[24],p[25],p[26],p[27],p[28],p[29],p[30],p[31]);
+}
+
 static void diagnoseAndHook(void) {
-    // 1) 枚举含 elle/substrate 的已加载镜像
     GRLog(@"== 镜像枚举 ==");
     uint32_t ic = _dyld_image_count();
     int found = 0;
     for (uint32_t i = 0; i < ic; i++) {
         const char *nm = _dyld_get_image_name(i);
-        if (strstr(nm, "elle") || strstr(nm, "Elle") ||
-            strstr(nm, "substrate") || strstr(nm, "Substrate")) {
+        if (strstr(nm, "substrate") || strstr(nm, "Substrate")) {
             GRLog(@"image: %s", nm); found++;
         }
     }
-    if (!found) GRLog(@"未发现 ElleKit/Substrate 镜像");
+    if (!found) GRLog(@"未发现 Substrate 镜像");
 
-    // 2) 探测 ObjC 类
-    Class ek = objc_getClass("ElleKit");
-    Class ek2 = objc_getClass("ELHook");
-    GRLog(@"ObjC 类 ElleKit=%p ELHook=%p", ek, ek2);
-
-    // 3) MSHookFunction 来源
     MSHookFunction_t msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
     if (!msHook) { GRLog(@"MSHookFunction = NULL，放弃"); return; }
     Dl_info info;
     if (dladdr((void *)msHook, &info)) {
-        GRLog(@"MSHookFunction=%p 来自 %s base=%p", msHook,
-              info.dli_fname ? info.dli_fname : "?", info.dli_fbase);
+        GRLog(@"MSHookFunction=%p 来自 %s", msHook,
+              info.dli_fname ? info.dli_fname : "?");
     }
 
-    // 4) 目标函数
     void *target = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
     if (!target) { GRLog(@"AudioUnitSetProperty = NULL"); return; }
-    GRLog(@"AudioUnitSetProperty=%p，hook 前指令: %02x %02x %02x %02x", target,
-          ((unsigned char *)target)[0], ((unsigned char *)target)[1],
-          ((unsigned char *)target)[2], ((unsigned char *)target)[3]);
+    GRLog(@"我们的 hook 函数地址=%p", (void *)hook_AudioUnitSetProperty);
+    dump32((unsigned char *)target, @"hook前");
 
     orig_AudioUnitSetProperty = NULL;
     msHook(target, (void *)hook_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty);
-    GRLog(@"hook 后 orig=%p，指令: %02x %02x %02x %02x", orig_AudioUnitSetProperty,
-          ((unsigned char *)target)[0], ((unsigned char *)target)[1],
-          ((unsigned char *)target)[2], ((unsigned char *)target)[3]);
+    GRLog(@"hook返回 orig=%p", orig_AudioUnitSetProperty);
+    dump32((unsigned char *)target, @"hook后");
 }
 
 #pragma mark - writer
@@ -415,7 +416,7 @@ static void stopRecording(void) {
     NSURL *url = gOutURL;
     gWriter = nil; gInput = nil; gAdaptor = nil; gAudioInput = nil;
     [w finishWritingWithCompletionHandler:^{
-        if (w.status != AVAssetWriterStatusCompleted) {
+        if (w.status != AVAssetWriterStatus) {
             GRLog(@"录制未完成 %ld", (long)w.status);
             return;
         }
@@ -539,23 +540,26 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
             NSLog(@"[GameRecorder] 非目标游戏 %@，跳过", bid);
             return;
         }
-        GRLog(@"✅ constructor 开始，bid=%@", bid);
+#if defined(__arm64e__)
+        GRLog(@"✅ constructor，dylib 编译架构 = arm64e");
+#elif defined(__arm64__)
+        GRLog(@"✅ constructor，dylib 编译架构 = arm64");
+#else
+        GRLog(@"✅ constructor，dylib 编译架构 = 其他");
+#endif
 
         gDevice = MTLCreateSystemDefaultDevice();
         gQueue = [gDevice newCommandQueue];
         CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, gDevice, NULL, &gTexCache);
         gWriteQ = dispatch_queue_create("GameRecorderWrite", DISPATCH_QUEUE_SERIAL);
-        GRLog(@"Metal/队列 初始化完成 device=%p", gDevice);
 
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
         if (m1) orig_nextDrawable = (id(*)(id,SEL))method_getImplementation(m1);
         if (m1) method_setImplementation(m1, (IMP)hook_nextDrawable);
-        GRLog(@"nextDrawable hook 完成");
 
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             GameRecorder_poll();
         });
-        GRLog(@"constructor 正常结束");
     }
 }
