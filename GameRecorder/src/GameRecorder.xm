@@ -475,7 +475,7 @@ static GameRecorderController *gCtrl;
 static void setupButton(void) {
     CGFloat x = 40, y = 300;
     gBtnWindow = [[UIWindow alloc] initWithFrame:CGRectMake(x, y, 56, 56)];
-    gBtnWindow.windowLevel = UIWindowWindowLevel;
+    gBtnWindow.windowLevel = UIWindowLevelStatusBar + 400;
     gBtnWindow.backgroundColor = [UIColor clearColor];
     gBtnWindow.userInteractionEnabled = YES;
 
