@@ -311,7 +311,7 @@ static void writerWritePixelBuffer(CVPixelBufferRef pb) {
     if (!gInput || !gInput.isReadyForMoreMediaData) return;
     double now = CACurrentMediaTime();
     CMTime pts = CMTimeMakeWithSeconds(now - gStartTime, 600);
-    [gAdaptor appendPixelBuffer:pb withPresentationTimepts];
+    [gAdaptor appendPixelBuffer:pb withPresentationTime:pts];
     gFrameCount++;
 }
 
