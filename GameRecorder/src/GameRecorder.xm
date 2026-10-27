@@ -464,7 +464,7 @@ static void setupButton(void) {
     [gBtn addSubview:gBtnLabel];
 
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:gCtrl action:@selector(btnPanned:)];
-    [gBtn addGestureRecogn:pan];
+    [gBtn addGestureRecognizer:pan];
 
     UIViewController *vc = [UIViewController new];
     vc.view = gBtn;
