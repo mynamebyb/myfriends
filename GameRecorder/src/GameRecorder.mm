@@ -304,6 +304,9 @@ static void saveToPhotos(NSURL *url) {
     } completionHandler:^(BOOL ok, NSError *err) {
         GRLog(@"%@ 存相册 %@", url.lastPathComponent,
               ok ? @"成功" : [NSString stringWithFormat:@"失败 %@", err]);
+        if (ok) {
+            [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
+        }
     }];
 }
 
@@ -361,7 +364,7 @@ static void captureDrawable(id<CAMetalDrawable> drawable) {
             CVPixelBufferRelease(pb);
         });
     }];
-    [cb commit];
+ [cb commit];
     if (mt) CFRelease(mt);
 }
 
@@ -397,6 +400,7 @@ static void stopRecording(void) {
     [w finishWritingWithCompletionHandler:^{
         if (w.status != AVAssetWriterStatusCompleted) {
             GRLog(@"录制未完成 %ld", (long)w.status);
+            [[NSFileManager defaultManager] removeItemAtURL:url error:nil];
             return;
         }
         GRLog(@"录制完成 %@", url.path);
