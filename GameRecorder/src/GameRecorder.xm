@@ -416,7 +416,7 @@ static void stopRecording(void) {
     NSURL *url = gOutURL;
     gWriter = nil; gInput = nil; gAdaptor = nil; gAudioInput = nil;
     [w finishWritingWithCompletionHandler:^{
-        if (w.status != AVAssetWriterStatus) {
+        if (w.status != AVAssetWriterStatusCompleted) {
             GRLog(@"录制未完成 %ld", (long)w.status);
             return;
         }
@@ -475,7 +475,7 @@ static GameRecorderController *gCtrl;
 static void setupButton(void) {
     CGFloat x = 40, y = 300;
     gBtnWindow = [[UIWindow alloc] initWithFrame:CGRectMake(x, y, 56, 56)];
-    gBtnWindow.windowLevel = UIWindowLevelStatusBar + 400;
+    gBtnWindow.windowLevel = UIWindowWindowLevel;
     gBtnWindow.backgroundColor = [UIColor clearColor];
     gBtnWindow.userInteractionEnabled = YES;
 
