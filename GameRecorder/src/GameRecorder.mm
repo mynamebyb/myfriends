@@ -194,7 +194,7 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
               (unsigned)gAudioASBD.mSampleRate, (unsigned)gAudioASBD.mChannelsPerFrame,
               (unsigned)gAudioASBD.mFormatID, (unsigned)gAudioASBD.mFormatFlags);
     }
-    if (inID == kAudioUnitProperty_SetRenderCallback && inScope == kAudioUnitScope_Input &&
+    if (inID == kAudioUnitProperty_SetRenderCallback &&
         inDataSize == sizeof(AURenderCallbackStruct) && !gAudioHookInstalled) {
         const AURenderCallbackStruct *cb = (const AURenderCallbackStruct *)inData;
         if (cb && cb->inputProc && cb->inputProc != tapRenderCallback) {
