@@ -1,7 +1,7 @@
 //
 //  GameRecorder.xm — CounterFlame 游戏画面录制器（standalone 注入 dylib）
 //
-//  版本：arm64e · constructor 立即 inline hook（解决启动早期错过 SetRenderCallback）
+//  版本：arm64e · litehook 全局 GOT 重绑定 AudioUnitSetProperty（不碰函数体，天然解决时机+PAC）
 //
 
 #import <Foundation/Foundation.h>
@@ -21,6 +21,8 @@
 #import <stdarg.h>
 #import <string.h>
 #import <mach-o/dyld.h>
+#import <ptrauth.h>
+#import "../vendor/litehook/litehook.h"
 
 #pragma mark - 文件日志
 
@@ -88,7 +90,10 @@ static UIView *gBtn;
 static UIButton *gBtnLabel;
 
 static id (*orig_nextDrawable)(id, SEL);
-static OSStatus (*orig_AudioUnitSetProperty)(AudioUnit, AudioUnitPropertyID, AudioUnitScope, AudioUnitElement, const void *, UInt32);
+
+typedef OSStatus (*GR_AUSetProperty_t)(AudioUnit, AudioUnitPropertyID, AudioUnitScope,
+                                       AudioUnitElement, const void *, UInt32);
+static GR_AUSetProperty_t gRealAUSetProperty = NULL;
 
 #pragma mark - 顶部视图控制器
 
@@ -146,9 +151,11 @@ static void enqueueAudioPCM(const AudioBufferList *abl, UInt32 inNumberFrames) {
                                       inNumberFrames, 1, &timing, 0, NULL, &sb);
     if (s == noErr && sb) {
         CMBlockBufferRef blk = NULL;
+        // 立即拷贝 PCM，原 buffer 在 render callback 返回后会被复用
         CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault,
                                            abl->mBuffers[0].mData,
-                                           bytes, kCFAllocatorNull, NULL, 0, bytes, 0, &blk);
+                                           bytes, kCFAllocatorNull, NULL, 0, bytes,
+                                           kCMBlockBufferAlwaysCopyDataFlag, &blk);
         if (blk) {
             CMSampleBufferSetDataBuffer(sb, blk);
             [gAudioInput appendSampleBuffer:sb];
@@ -182,7 +189,7 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
     GRLog(@"★ hook被调用 id=%d scope=%d size=%u", (int)inID, (int)inScope, (unsigned)inDataSize);
     if (inID == kAudioUnitProperty_StreamFormat && inScope == kAudioUnitScope_Input &&
         inDataSize == sizeof(AudioStreamBasicDescription)) {
-        memcpy(&gAudioASBD, inData, sizeof(AudioStreamBasicDescription));
+        memcpy(&gAudioASBD, inData, sizeof(gAudioASBD));
         GRLog(@"记录音频格式 %uHz %uch fmt=%u flags=%u",
               (unsigned)gAudioASBD.mSampleRate, (unsigned)gAudioASBD.mChannelsPerFrame,
               (unsigned)gAudioASBD.mFormatID, (unsigned)gAudioASBD.mFormatFlags);
@@ -199,32 +206,28 @@ static OSStatus hook_AudioUnitSetProperty(AudioUnit inUnit,
             wrapped.inputProc = tapRenderCallback;
             wrapped.inputProcRefCon = gOrigRenderUserData;
 
-            GRLog(@"已 hook 游戏 render callback: %p", cb->inputProc);
-            if (orig_AudioUnitSetProperty) {
-                return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, &wrapped, sizeof(wrapped));
-            }
-            GRLog(@"orig 为 NULL，无法注册 wrapped");
+            GRLog(@"已 hook 游戏 render callback: %p", (void *)cb->inputProc);
+            return gRealAUSetProperty(inUnit, inID, inScope, inElement, &wrapped, sizeof(wrapped));
         }
     }
-    if (orig_AudioUnitSetProperty) {
-        return orig_AudioUnitSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
-    }
-    return noErr;
+    return gRealAUSetProperty(inUnit, inID, inScope, inElement, inData, inDataSize);
 }
 
-#pragma mark - inline hook
-
-typedef void (*MSHookFunction_t)(void *symbol, void *replace, void **result);
+#pragma mark - GOT 重绑定安装
 
 static void installAudioHook(void) {
-    MSHookFunction_t msHook = (MSHookFunction_t)dlsym(RTLD_DEFAULT, "MSHookFunction");
-    if (!msHook) { GRLog(@"✗ 未找到 MSHookFunction"); return; }
-    void *target = dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
-    if (!target) { GRLog(@"✗ dlsym AudioUnitSetProperty 失败"); return; }
-    GRLog(@"hook前 target=%p hookFunc=%p", target, (void *)hook_AudioUnitSetProperty);
-    orig_AudioUnitSetProperty = NULL;
-    msHook(target, (void *)hook_AudioUnitSetProperty, (void **)&orig_AudioUnitSetProperty);
-    GRLog(@"hook后 orig=%p", orig_AudioUnitSetProperty);
+    gRealAUSetProperty = (GR_AUSetProperty_t)dlsym(RTLD_DEFAULT, "AudioUnitSetProperty");
+    if (!gRealAUSetProperty) { GRLog(@"✗ dlsym AudioUnitSetProperty 失败"); return; }
+
+    // replacee：dlsym 返回的真实函数（已带 function-pointer 签名）
+    void *replacee = (void *)gRealAUSetProperty;
+    // replacement：显式用 function-pointer key/disc0 签名，满足 litehook 内部 auth_and_resign
+    void *replacement = ptrauth_sign_unauthenticated((void *)hook_AudioUnitSetProperty,
+                                                     ptrauth_key_function_pointer, 0);
+
+    // 全局模式：立即作用于已加载镜像，并对未来加载的镜像自动生效
+    litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, replacee, replacement, NULL);
+    GRLog(@"✓ GOT 重绑定完成 real=%p", (void *)gRealAUSetProperty);
 }
 
 #pragma mark - writer
@@ -252,7 +255,7 @@ static BOOL initWriterWithSize(CGSize outSize) {
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
     gInput.expectsMediaDataInRealTime = YES;
     gAdaptor = [AVAssetWriterInputPixelBufferAdaptor assetWriterInputPixelBufferAdaptorWithAssetWriterInput:gInput
-        sourcePixelBufferAttributes:@{
+        sourcePixelBufferAttributes: @{
             (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
             (id)kCVPixelBufferWidthKey: @((int)gVideoSize.width),
             (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height)
@@ -301,7 +304,7 @@ static void saveToPhotos(NSURL *url) {
     } completionHandler:^(BOOL ok, NSError *err) {
         GRLog(@"%@ 存相册 %@", url.lastPathComponent,
               ok ? @"成功" : [NSString stringWithFormat:@"失败 %@", err]);
-    }];
+    }});
 }
 
 static void writerWritePixelBuffer(CVPixelBufferRef pb) {
@@ -519,7 +522,7 @@ __attribute__((constructor)) static void GameRecorder_ctor(void) {
         CVMetalTextureCacheCreate(kCFAllocatorDefault, NULL, gDevice, NULL, &gTexCache);
         gWriteQ = dispatch_queue_create("GameRecorderWrite", DISPATCH_QUEUE_SERIAL);
 
-        // 立即 hook，赶在 FMOD 启动注册 callback 之前
+        // 立即做 GOT 重绑定，对已加载和未来镜像都生效
         installAudioHook();
 
         Method m1 = class_getInstanceMethod([CAMetalLayer class], @selector(nextDrawable));
