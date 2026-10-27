@@ -22,9 +22,7 @@
 #import <string.h>
 #import <mach-o/dyld.h>
 #import <ptrauth.h>
-extern "C" {
 #import "../vendor/litehook/litehook.h"
-}
 
 #pragma mark - 文件日志
 
