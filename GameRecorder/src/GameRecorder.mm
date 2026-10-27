@@ -22,7 +22,9 @@
 #import <string.h>
 #import <mach-o/dyld.h>
 #import <ptrauth.h>
+extern "C" {
 #import "../vendor/litehook/litehook.h"
+}
 
 #pragma mark - 文件日志
 
@@ -107,7 +109,7 @@ static UIViewController *topViewController(void) {
 static CAMetalLayer *findGameLayer(void) {
     CAMetalLayer *best = nil;
     CGFloat bestArea = 0;
-    for (UIWindow *w in [UIApplication sharedApplication].windows) {
+    for (UIWindow *w : [UIApplication sharedApplication].windows) {
         if (w.hidden) continue;
         UIView *rv = w.rootViewController.view;
         if (!rv) continue;
@@ -120,7 +122,7 @@ static CAMetalLayer *findGameLayer(void) {
                 CGFloat a = b.size.width * b.size.height;
                 if (a > bestArea) { bestArea = a; best = (CAMetalLayer *)cur.layer; }
             }
-            for (UIView *sv in cur.subviews) [stack addObject:sv];
+            for (UIView *sv : cur.subviews) [stack addObject:sv];
         }
     }
     return best;
@@ -255,7 +257,7 @@ static BOOL initWriterWithSize(CGSize outSize) {
     gInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:os];
     gInput.expectsMediaDataInRealTime = YES;
     gAdaptor = [AVAssetWriterInputPixelBufferAdaptor assetWriterInputPixelBufferAdaptorWithAssetWriterInput:gInput
-        sourcePixelBufferAttributes:@{
+        sourcePixelBufferAttributes:{
             (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
             (id)kCVPixelBufferWidthKey: @((int)gVideoSize.width),
             (id)kCVPixelBufferHeightKey: @((int)gVideoSize.height)
@@ -303,7 +305,7 @@ static void saveToPhotos(NSURL *url) {
         [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:url];
     } completionHandler:^(BOOL ok, NSError *err) {
         GRLog(@"%@ 存相册 %@", url.lastPathComponent,
-              ok ? @"成功" : [NSString stringWithFormat:@"失败 %@", err]);
+              ok ? "成功" : [NSString stringWithFormat:@"失败 %@", err]);
     }];
 }
 
